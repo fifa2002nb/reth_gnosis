@@ -9222,6 +9222,7 @@ dependencies = [
  "gnosis-primitives",
  "hex",
  "indicatif",
+ "jsonrpsee",
  "libc",
  "rayon",
  "reqwest 0.13.3",
