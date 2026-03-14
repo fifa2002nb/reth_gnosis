@@ -70,6 +70,7 @@ reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1
 
 eyre = "0.6"
 clap = { version = "4", features = ["derive"] }
+jsonrpsee = { version = "0.26", features = ["server", "macros", "jsonrpsee-types"] }
 derive_more = { version = "2", default-features = false, features = ["full"] }
 
 # revm
