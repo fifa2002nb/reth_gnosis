@@ -6,7 +6,8 @@ use reth_gnosis::engine::GnosisEngineValidator;
 use reth_gnosis::initialize::download_init_state::{CHIADO_DOWNLOAD_SPEC, GNOSIS_DOWNLOAD_SPEC};
 use reth_gnosis::initialize::import_and_ensure_state::download_and_import_init_state;
 use reth_gnosis::{
-    cli::gnosis_cli::GnosisCli, spec::gnosis_spec::GnosisChainSpecParser, GnosisNode,
+    cli::gnosis_cli::GnosisCli, register_fork_simulation_rpc, spec::gnosis_spec::GnosisChainSpecParser,
+    GnosisNode,
 };
 use reth_rpc::ValidationApi;
 use reth_rpc_api::servers::BlockSubmissionValidationApiServer;
@@ -56,6 +57,8 @@ fn run_reth(cli: CliGnosis) {
         let handle = builder
             .node(GnosisNode::new())
             .extend_rpc_modules(|ctx| {
+                // Flashbots merge must run before `register_fork_simulation_rpc(ctx)` — that call
+                // consumes `ctx` by value.
                 let validation_api = ValidationApi::new(
                     ctx.provider().clone(),
                     Arc::new(ctx.node().consensus().clone()),
@@ -68,6 +71,9 @@ fn run_reth(cli: CliGnosis) {
                     RethRpcModule::Flashbots,
                     validation_api.into_rpc(),
                 )?;
+                // NodeBuilder::extend_rpc_modules replaces GnosisNode add-ons' hook; register fork
+                // + arb simulation here or `arb_simulateArbitrageAtBlock` is never exposed.
+                register_fork_simulation_rpc(ctx)?;
                 Ok(())
             })
             .launch_with_debug_capabilities()
