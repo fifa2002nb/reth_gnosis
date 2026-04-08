@@ -45,8 +45,13 @@ pub mod block;
 mod build;
 mod fork_simulation;
 
-/// Register eth_forkSyncStatus, eth_callAtBlock, eth_callScriptAtBlock into RPC modules.
-fn register_fork_simulation_rpc<Node, EthApi>(
+/// Register `eth_forkSyncStatus`, `eth_callAtBlock`, `eth_callScriptAtBlock`, and
+/// `arb_simulateArbitrageAtBlock` into the configured HTTP/WS/IPC transports.
+///
+/// **Important:** `NodeBuilderWithComponents::extend_rpc_modules` replaces any hook previously set
+/// on `GnosisNode`'s add-ons. The `reth` binary must call this inside its `extend_rpc_modules`
+/// closure so these methods stay registered alongside Flashbots.
+pub fn register_fork_simulation_rpc<Node, EthApi>(
     ctx: RpcContext<'_, Node, EthApi>,
 ) -> eyre::Result<()>
 where
