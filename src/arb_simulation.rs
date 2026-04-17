@@ -65,6 +65,8 @@ const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
 const START_FLASH_LOAN_BALANCER_SELECTOR: [u8; 4] = [0x93, 0x8f, 0xbc, 0x15];
 /// startFlashLoanBalancerV3(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Balancer V3 Vault 闪电贷
 const START_FLASH_LOAN_BALANCER_V3_SELECTOR: [u8; 4] = [0x8f, 0x57, 0xfc, 0xdc];
+/// startFlashLoanAave(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Aave V3 Pool 闪电贷
+const START_FLASH_LOAN_AAVE_SELECTOR: [u8; 4] = [0xf2, 0xa9, 0x86, 0xb4];
 /// executePath(bool,bytes) selector
 const EXECUTE_PATH_SELECTOR: [u8; 4] = [0x91, 0x25, 0x2c, 0x55];
 /// WETH() selector: keccak256("WETH()")[0:4]
@@ -286,6 +288,14 @@ fn use_balancer_flash_selector(request: &ArbitrageSimRequest) -> bool {
             .flash_loan_type
             .as_deref()
             .is_some_and(|s| s.eq_ignore_ascii_case("balancer"))
+}
+
+#[inline]
+fn use_aave_flash_selector(request: &ArbitrageSimRequest) -> bool {
+    request
+        .flash_loan_type
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("aave"))
 }
 
 /// 分步 trace 信息
@@ -679,13 +689,15 @@ where
                     (START_FLASH_LOAN_BALANCER_V3_SELECTOR, params.abi_encode_params())
                 } else if use_balancer_flash_selector(&request) {
                     (START_FLASH_LOAN_BALANCER_SELECTOR, params.abi_encode_params())
+                } else if use_aave_flash_selector(&request) {
+                    (START_FLASH_LOAN_AAVE_SELECTOR, params.abi_encode_params())
                 } else {
                     (START_FLASH_LOAN_V4_SELECTOR, params.abi_encode_params())
                 }
             } else {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
-                    "useFlashLoan=true requires one of: flashLoanPair (V2), flashLoanPool (V3), or flashLoanCurrency+flashLoanAmount (Ultra: flashLoanType=Balancer|BalancerV3 or flashLoanBalancer=true; FlashArbV3V4 V4 flash: flashLoanBalancer=false)",
+                    "useFlashLoan=true requires one of: flashLoanPair (V2), flashLoanPool (V3), or flashLoanCurrency+flashLoanAmount (Ultra: flashLoanType=Aave|Balancer|BalancerV3 or flashLoanBalancer=true; FlashArbV3V4 V4 flash: flashLoanBalancer=false)",
                     None::<()>,
                 ));
             };
