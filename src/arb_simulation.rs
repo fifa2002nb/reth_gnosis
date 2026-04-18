@@ -442,6 +442,10 @@ where
         let basefee = evm_env.block_env.basefee;
         let chain_id = evm_env.cfg_env.chain_id;
         let block_gas_limit = evm_env.block_env.gas_limit;
+        // Block gas limit on Gnosis can be 17M while Osaka sets per-tx cap at 2^24 (16_777_216);
+        // `TX_GAS_LIMIT.min(block_gas_limit)` alone exceeds that cap and fails tx validation.
+        let tx_cap = evm_env.cfg_env.tx_gas_limit_cap.unwrap_or(u64::MAX);
+        let sim_tx_gas_limit = TX_GAS_LIMIT.min(block_gas_limit).min(tx_cap);
         let state_db = StateProviderDatabase::new(&state_provider);
         let mut cache_db = CacheDB::new(state_db);
 
@@ -498,7 +502,7 @@ where
             kind: TxKind::Create,
             data: request.arb_contract_bytecode.clone(),
             value: U256::ZERO,
-            gas_limit: TX_GAS_LIMIT.min(block_gas_limit),
+            gas_limit: sim_tx_gas_limit,
             nonce: 0,
             gas_price: basefee.into(),
             gas_priority_fee: Some(0),
@@ -708,7 +712,7 @@ where
                 kind: TxKind::Call(arb_address),
                 data: Bytes::from(calldata),
                 value: U256::ZERO,
-                gas_limit: TX_GAS_LIMIT.min(block_gas_limit),
+                gas_limit: sim_tx_gas_limit,
                 nonce: 1,
                 gas_price: basefee.into(),
                 gas_priority_fee: Some(0),
@@ -771,7 +775,7 @@ where
                 kind: TxKind::Call(arb_address),
                 data: Bytes::from(calldata),
                 value,
-                gas_limit: TX_GAS_LIMIT.min(block_gas_limit),
+                gas_limit: sim_tx_gas_limit,
                 nonce: execute_path_nonce,
                 gas_price: basefee.into(),
                 gas_priority_fee: Some(0),
