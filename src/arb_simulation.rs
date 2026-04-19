@@ -720,7 +720,7 @@ where
                         pool,
                         coins,
                         coin_index,
-                        *amount,
+                        amount,
                         request.is_first_last_same_eth,
                         request.path_data.to_vec(),
                     );
