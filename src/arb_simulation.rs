@@ -713,18 +713,28 @@ where
                     (START_FLASH_LOAN_AAVE_SELECTOR, params.abi_encode_params())
                 } else if use_curve_ng_flash_selector(&request) {
                     // startFlashLoanCurveNG(address pool, address[] coins, uint8 coinIndex, uint256 amount, bool isFirstLastSameETH, bytes pathData)
+                    // Vec<Address> 不实现 SolValue，用 alloy_dyn_abi 编码 address[] 动态数组
+                    use alloy_dyn_abi::DynSolValue;
                     let pool = request.flash_loan_pool.unwrap_or(*currency);
-                    let coins: Vec<Address> = request.curve_flash_loan_coins.clone().unwrap_or_default();
-                    let coin_index: u8 = request.curve_flash_loan_coin_index.unwrap_or(0);
-                    let curve_params = (
-                        pool,
-                        coins,
-                        coin_index,
-                        amount,
-                        request.is_first_last_same_eth,
-                        request.path_data.to_vec(),
-                    );
-                    (START_FLASH_LOAN_CURVE_NG_SELECTOR, curve_params.abi_encode_params())
+                    let coins_dyn: Vec<DynSolValue> = request
+                        .curve_flash_loan_coins
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|a| DynSolValue::Address(*a))
+                        .collect();
+                    let coin_index_u256 = U256::from(request.curve_flash_loan_coin_index.unwrap_or(0));
+                    let encoded = DynSolValue::Tuple(vec![
+                        DynSolValue::Address(pool),
+                        DynSolValue::Array(coins_dyn),
+                        DynSolValue::Uint(coin_index_u256, 256),
+                        DynSolValue::Uint(amount, 256),
+                        DynSolValue::Bool(request.is_first_last_same_eth),
+                        DynSolValue::Bytes(request.path_data.to_vec()),
+                    ])
+                    .abi_encode_sequence()
+                    .unwrap_or_default();
+                    (START_FLASH_LOAN_CURVE_NG_SELECTOR, encoded)
                 } else {
                     (START_FLASH_LOAN_V4_SELECTOR, params.abi_encode_params())
                 }
