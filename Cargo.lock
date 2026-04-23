@@ -9201,7 +9201,6 @@ version = "1.0.3"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
- "alloy-dyn-abi",
  "alloy-eips",
  "alloy-evm",
  "alloy-genesis",
