@@ -67,8 +67,6 @@ const START_FLASH_LOAN_BALANCER_SELECTOR: [u8; 4] = [0x93, 0x8f, 0xbc, 0x15];
 const START_FLASH_LOAN_BALANCER_V3_SELECTOR: [u8; 4] = [0x8f, 0x57, 0xfc, 0xdc];
 /// startFlashLoanAave(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Aave V3 Pool 闪电贷
 const START_FLASH_LOAN_AAVE_SELECTOR: [u8; 4] = [0xf2, 0xa9, 0x86, 0xb4];
-/// startFlashLoanCurveNG(address,address[],uint8,uint256,bool,bytes) — Curve Stable NG 闪电贷
-const START_FLASH_LOAN_CURVE_NG_SELECTOR: [u8; 4] = [0x02, 0x4e, 0x84, 0xb5];
 /// executePath(bool,bytes) selector
 const EXECUTE_PATH_SELECTOR: [u8; 4] = [0x91, 0x25, 0x2c, 0x55];
 /// WETH() selector: keccak256("WETH()")[0:4]
@@ -260,12 +258,6 @@ pub struct ArbitrageSimRequest {
     pub amount0_out: Option<String>,
     #[serde(default)]
     pub amount1_out: Option<String>,
-    /// Curve NG 闪电贷：pool 内借入 token 的 coin 下标
-    #[serde(default)]
-    pub curve_flash_loan_coin_index: Option<u8>,
-    /// Curve NG 闪电贷：pool 所有 coin 地址（按 coins(i) 顺序），用于回调还款
-    #[serde(default)]
-    pub curve_flash_loan_coins: Option<Vec<Address>>,
     pub is_first_last_same_eth: bool,
     /// arb 合约 init bytecode，模拟时 CREATE 部署
     pub arb_contract_bytecode: Bytes,
@@ -304,14 +296,6 @@ fn use_aave_flash_selector(request: &ArbitrageSimRequest) -> bool {
         .flash_loan_type
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("aave"))
-}
-
-#[inline]
-fn use_curve_ng_flash_selector(request: &ArbitrageSimRequest) -> bool {
-    request
-        .flash_loan_type
-        .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case("curveng"))
 }
 
 /// 分步 trace 信息
@@ -711,30 +695,6 @@ where
                     (START_FLASH_LOAN_BALANCER_SELECTOR, params.abi_encode_params())
                 } else if use_aave_flash_selector(&request) {
                     (START_FLASH_LOAN_AAVE_SELECTOR, params.abi_encode_params())
-                } else if use_curve_ng_flash_selector(&request) {
-                    // startFlashLoanCurveNG(address pool, address[] coins, uint8 coinIndex, uint256 amount, bool isFirstLastSameETH, bytes pathData)
-                    // Vec<Address> 不实现 SolValue，用 alloy_dyn_abi 编码 address[] 动态数组
-                    use alloy_dyn_abi::DynSolValue;
-                    let pool = request.flash_loan_pool.unwrap_or(*currency);
-                    let coins_dyn: Vec<DynSolValue> = request
-                        .curve_flash_loan_coins
-                        .as_deref()
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|a| DynSolValue::Address(*a))
-                        .collect();
-                    let coin_index_u256 = U256::from(request.curve_flash_loan_coin_index.unwrap_or(0));
-                    let encoded = DynSolValue::Tuple(vec![
-                        DynSolValue::Address(pool),
-                        DynSolValue::Array(coins_dyn),
-                        DynSolValue::Uint(coin_index_u256, 256),
-                        DynSolValue::Uint(amount, 256),
-                        DynSolValue::Bool(request.is_first_last_same_eth),
-                        DynSolValue::Bytes(request.path_data.to_vec()),
-                    ])
-                    .abi_encode_sequence()
-                    .unwrap_or_default();
-                    (START_FLASH_LOAN_CURVE_NG_SELECTOR, encoded)
                 } else {
                     (START_FLASH_LOAN_V4_SELECTOR, params.abi_encode_params())
                 }
