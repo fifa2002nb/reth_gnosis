@@ -180,23 +180,19 @@ where
         })?;
 
         Ok(match result.result {
-            ExecutionResult::Success {
-                output, gas_used, ..
-            } => CallResult {
+            ExecutionResult::Success { output, gas, .. } => CallResult {
                 output: output.into_data().into(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: "success".to_string(),
             },
-            ExecutionResult::Halt {
-                reason, gas_used, ..
-            } => CallResult {
+            ExecutionResult::Halt { reason, gas, .. } => CallResult {
                 output: Bytes::new(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: format!("halt: {:?}", reason),
             },
-            ExecutionResult::Revert { output, gas_used } => CallResult {
+            ExecutionResult::Revert { output, gas, .. } => CallResult {
                 output: output.into(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: "reverted".to_string(),
             },
         })
@@ -259,23 +255,19 @@ where
         })?;
 
         Ok(match result.result {
-            ExecutionResult::Success {
-                output, gas_used, ..
-            } => CallResult {
+            ExecutionResult::Success { output, gas, .. } => CallResult {
                 output: output.into_data().into(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: "success".to_string(),
             },
-            ExecutionResult::Halt {
-                reason, gas_used, ..
-            } => CallResult {
+            ExecutionResult::Halt { reason, gas, .. } => CallResult {
                 output: Bytes::new(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: format!("halt: {:?}", reason),
             },
-            ExecutionResult::Revert { output, gas_used } => CallResult {
+            ExecutionResult::Revert { output, gas, .. } => CallResult {
                 output: output.into(),
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 status: "reverted".to_string(),
             },
         })

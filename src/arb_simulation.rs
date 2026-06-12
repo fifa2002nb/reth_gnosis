@@ -518,27 +518,24 @@ where
         let create_result = evm.transact(create_tx).map_err(|e| {
             ErrorObjectOwned::owned(-32000, format!("CREATE failed: {}", e), None::<()>)
         })?;
-        let create_gas = match &create_result.result {
-            ExecutionResult::Success { gas_used, .. } => *gas_used,
-            ExecutionResult::Revert { gas_used, .. } | ExecutionResult::Halt { gas_used, .. } => *gas_used,
-        };
+        let create_gas = create_result.result.tx_gas_used();
         tracing::info!(gas = create_gas, "step: CREATE done");
 
-        if let ExecutionResult::Revert { output, gas_used } = &create_result.result {
+        if let ExecutionResult::Revert { output, .. } = &create_result.result {
             return Ok(ArbitrageSimResult {
                 success: false,
                 profit_wei: "0".to_string(),
-                gas_used: *gas_used,
+                gas_used: create_gas,
                 revert_reason: Some(format!("CREATE reverted: {:?}", output)),
                 revert_output: None,
                 trace: None,
             });
         }
-        if let ExecutionResult::Halt { reason, gas_used } = &create_result.result {
+        if let ExecutionResult::Halt { reason, .. } = &create_result.result {
             return Ok(ArbitrageSimResult {
                 success: false,
                 profit_wei: "0".to_string(),
-                gas_used: *gas_used,
+                gas_used: create_gas,
                 revert_reason: Some(format!("CREATE halt: {:?}", reason)),
                 revert_output: None,
                 trace: None,
@@ -613,13 +610,13 @@ where
                         )
                     })?;
                     match &transfer_result.result {
-                        ExecutionResult::Success { gas_used, .. } => {
-                            transfer_gas_used = Some(*gas_used);
+                        ExecutionResult::Success { gas, .. } => {
+                            transfer_gas_used = Some(gas.tx_gas_used());
                             transfer_reverted = Some(false);
-                            tracing::info!(gas = gas_used, "step: transfer done");
+                            tracing::info!(gas = gas.tx_gas_used(), "step: transfer done");
                         }
-                        ExecutionResult::Revert { output, gas_used } => {
-                            transfer_gas_used = Some(*gas_used);
+                        ExecutionResult::Revert { output, gas, .. } => {
+                            transfer_gas_used = Some(gas.tx_gas_used());
                             transfer_reverted = Some(true);
                             transfer_revert_output =
                                 Some(format!("0x{}", hex::encode(output.as_ref())));
@@ -628,8 +625,8 @@ where
                                 "step: transfer REVERTED"
                             );
                         }
-                        ExecutionResult::Halt { reason, gas_used } => {
-                            transfer_gas_used = Some(*gas_used);
+                        ExecutionResult::Halt { reason, gas, .. } => {
+                            transfer_gas_used = Some(gas.tx_gas_used());
                             transfer_reverted = Some(true);
                             transfer_revert_output =
                                 Some(format!("halt:{:?}", reason));
@@ -792,8 +789,8 @@ where
         };
 
         let (success, gas_used, revert_reason, revert_output) = match &call_result.result {
-            ExecutionResult::Success { gas_used, .. } => (true, *gas_used, None, None),
-            ExecutionResult::Revert { output, gas_used } => {
+            ExecutionResult::Success { gas, .. } => (true, gas.tx_gas_used(), None, None),
+            ExecutionResult::Revert { output, gas, .. } => {
                 let hex_out = format!("0x{}", hex::encode(output.as_ref()));
                 let reason = if output.as_ref().is_empty() {
                     "reverted: 0x (empty)".to_string()
@@ -804,16 +801,11 @@ where
                 } else {
                     format!("reverted: {}", hex_out)
                 };
-                (
-                    false,
-                    *gas_used,
-                    Some(reason),
-                    Some(hex_out),
-                )
+                (false, gas.tx_gas_used(), Some(reason), Some(hex_out))
             }
-            ExecutionResult::Halt { reason, gas_used } => (
+            ExecutionResult::Halt { reason, gas, .. } => (
                 false,
-                *gas_used,
+                gas.tx_gas_used(),
                 Some(format!("halt: {:?}", reason)),
                 None,
             ),
