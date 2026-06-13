@@ -71,6 +71,9 @@ const START_FLASH_LOAN_AAVE_SELECTOR: [u8; 4] = [0xf2, 0xa9, 0x86, 0xb4];
 const EXECUTE_PATH_SELECTOR: [u8; 4] = [0x91, 0x25, 0x2c, 0x55];
 /// WETH() selector: keccak256("WETH()")[0:4]
 const WETH_SELECTOR: [u8; 4] = [0xad, 0x5c, 0x46, 0x48];
+/// token0() / token1() selectors (Uniswap V2 pair / V3 pool)
+const TOKEN0_SELECTOR: [u8; 4] = [0x0d, 0xfe, 0x16, 0x81];
+const TOKEN1_SELECTOR: [u8; 4] = [0xd2, 0x12, 0x20, 0xc7];
 /// balanceOf(address) selector: keccak256("balanceOf(address)")[0:4]
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 /// transfer(address,uint256) selector: 0xa9059cbb
@@ -119,6 +122,99 @@ where
         }
         _ => None,
     }
+}
+
+/// 从合约 view 调用返回值解码 address（末 20 字节）
+fn decode_address_output(output: &[u8]) -> Option<Address> {
+    if output.len() >= 32 {
+        Some(Address::from_slice(&output[12..32]))
+    } else {
+        None
+    }
+}
+
+/// 静态调用 pair/pool 的 token0 或 token1
+fn get_pool_token<EV>(
+    evm: &mut EV,
+    pool: Address,
+    caller: Address,
+    selector: [u8; 4],
+) -> Option<Address>
+where
+    EV: reth_evm::Evm<DB: revm::Database>,
+{
+    let res = evm.transact_system_call(caller, pool, Bytes::from(Vec::from(selector)));
+    let Ok(rs) = res else { return None };
+    match &rs.result {
+        ExecutionResult::Success { output, .. } => decode_address_output(output.data().as_ref()),
+        _ => None,
+    }
+}
+
+/// 闪电贷路径：回调内已还清本金+fee，利润 = arb 合约上借入 token 的剩余 ERC20 余额。
+/// 优先 `flash_loan_currency`（Aave/Balancer/V4），否则 `initial_token`（goodboy 首跳 tokenIn），
+/// 再否则从 V2 pair / V3 pool 的 amount0/amount1 推断借入侧。
+fn compute_profit_wei_flash_loan<EV>(
+    evm: &mut EV,
+    arb_address: Address,
+    caller: Address,
+    request: &ArbitrageSimRequest,
+) -> Result<String, ()>
+where
+    EV: reth_evm::Evm<DB: revm::Database>,
+{
+    let profit_token = if let Some(currency) = request.flash_loan_currency {
+        if currency != Address::ZERO {
+            Some(currency)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .or_else(|| {
+        request.initial_token.and_then(|t| {
+            if t != Address::ZERO {
+                Some(t)
+            } else {
+                None
+            }
+        })
+    })
+    .or_else(|| {
+        if let Some(pair) = request.flash_loan_pair {
+            let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
+            let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
+            if amount0 > U256::ZERO {
+                get_pool_token(evm, pair, caller, TOKEN0_SELECTOR)
+            } else if amount1 > U256::ZERO {
+                get_pool_token(evm, pair, caller, TOKEN1_SELECTOR)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    })
+    .or_else(|| {
+        if let Some(pool) = request.flash_loan_pool {
+            let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
+            let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
+            if amount0 > U256::ZERO {
+                get_pool_token(evm, pool, caller, TOKEN0_SELECTOR)
+            } else if amount1 > U256::ZERO {
+                get_pool_token(evm, pool, caller, TOKEN1_SELECTOR)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    let profit_token = profit_token.ok_or(())?;
+    let balance = get_erc20_balance(evm, profit_token, arb_address, caller).ok_or(())?;
+    Ok(balance.to_string())
 }
 
 /// 计算利润：profit = (arb native balance + arb WETH balance) - initial_amount
@@ -814,7 +910,10 @@ where
         evm.db_mut().commit(call_result.state);
 
         let profit_wei = if success {
-            if request.is_first_last_same_eth {
+            if request.use_flash_loan {
+                compute_profit_wei_flash_loan(&mut evm, arb_address, arb_deployer, &request)
+                    .unwrap_or_else(|_| "0".to_string())
+            } else if request.is_first_last_same_eth {
                 compute_profit_wei(&mut evm, arb_address, arb_deployer, &request)
                     .unwrap_or_else(|_| "0".to_string())
             } else if request.initial_token.is_some() && request.initial_token != Some(Address::ZERO) {
