@@ -27,9 +27,11 @@ reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-chain-state = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
+reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 reth-cli-runner = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
@@ -86,6 +88,7 @@ revm-primitives = { version = "23.0.0", features = [
 revm-inspectors = "0.39.0"
 
 futures-util = { version = "0.3", default-features = false }
+tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"], default-features = false }
 serde_json = "1.0"
 serde_with = "3"

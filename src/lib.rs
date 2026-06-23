@@ -20,6 +20,7 @@ use reth_node_builder::{
     PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_ethereum::EthereumEthApiBuilder;
+use reth_chain_state::CanonStateSubscriptions;
 use reth_provider::{
     BlockHashReader, BlockNumReader, EthStorage, HeaderProvider, StateProviderFactory,
 };
@@ -30,6 +31,7 @@ use crate::{
     arb_simulation::{ArbitrageSimulationApiServer, ArbitrageSimulationImpl},
     engine::{GnosisEngineTypes, GnosisEngineValidator},
     fork_simulation::{ForkSimulationApiServer, ForkSimulationImpl},
+    block_end_log_pubsub::{BlockEndLogPubSub, BlockEndLogPubSubApiServer},
     payload::GnosisBuiltPayload,
     primitives::{
         block::{BlockBody, GnosisBlock, TransactionSigned},
@@ -44,6 +46,7 @@ mod blobs;
 pub mod block;
 mod build;
 mod fork_simulation;
+mod block_end_log_pubsub;
 
 /// Register `eth_forkSyncStatus`, `eth_callAtBlock`, `eth_callScriptAtBlock`, and
 /// `arb_simulateArbitrageAtBlock` into the configured HTTP/WS/IPC transports.
@@ -61,6 +64,7 @@ where
         + BlockHashReader
         + HeaderProvider<Header = GnosisHeader>
         + StateProviderFactory
+        + CanonStateSubscriptions<Primitives = GnosisNodePrimitives>
         + Clone
         + Send
         + Sync
@@ -69,8 +73,10 @@ where
     let provider = ctx.node().provider().clone();
     let evm_config = ctx.node().evm_config().clone();
     let fork_sim = ForkSimulationImpl::new(provider.clone(), evm_config.clone());
-    let arb_sim = ArbitrageSimulationImpl::new(provider, evm_config);
+    let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config);
+    let log_pubsub = BlockEndLogPubSub::new(provider);
     let mut methods = Methods::new();
+    methods.merge(log_pubsub.into_rpc())?;
     methods.merge(fork_sim.into_rpc())?;
     methods.merge(arb_sim.into_rpc())?;
     ctx.modules.merge_configured(methods)?;
