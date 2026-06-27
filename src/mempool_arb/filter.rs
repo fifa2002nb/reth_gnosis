@@ -1,10 +1,10 @@
 use alloy_primitives::Bytes;
 use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
 
-use super::config::{is_blacklisted_selector, PLAIN_TRANSFER_GAS};
+use super::config::{Blacklist, PLAIN_TRANSFER_GAS};
 
 /// Returns true when the tx should be tracked for tip intelligence.
-pub fn should_track<T: PoolTransaction>(tx: &ValidPoolTransaction<T>) -> bool {
+pub fn should_track<T: PoolTransaction>(tx: &ValidPoolTransaction<T>, blacklist: &Blacklist) -> bool {
     if tx.to().is_none() {
         return false;
     }
@@ -12,7 +12,7 @@ pub fn should_track<T: PoolTransaction>(tx: &ValidPoolTransaction<T>) -> bool {
     if input.is_empty() && tx.gas_limit() <= PLAIN_TRANSFER_GAS {
         return false;
     }
-    if input.len() >= 4 && is_blacklisted_selector(read_selector(input)) {
+    if input.len() >= 4 && blacklist.contains(read_selector(input)) {
         return false;
     }
     true

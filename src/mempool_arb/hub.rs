@@ -7,6 +7,7 @@ use alloy_primitives::{B256, U256};
 use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
 use tokio::sync::broadcast;
 
+use super::config::{Blacklist, Whitelist};
 use super::types::{
     PendingArbSnapshot, PendingArbSnapshotEntry, PendingArbSnapshotFilter, PendingArbTxEvent,
 };
@@ -23,17 +24,32 @@ fn pending_block_number(head_block: u64) -> u64 {
 pub struct MempoolArbHub {
     index: RwLock<HashMap<B256, PendingArbTxEvent>>,
     head_block_number: AtomicU64,
+    blacklist: Blacklist,
+    whitelist: Whitelist,
     tx: broadcast::Sender<PendingArbTxEvent>,
+    wl_tx: broadcast::Sender<PendingArbTxEvent>,
 }
 
 impl MempoolArbHub {
     pub fn new() -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        let (wl_tx, _) = broadcast::channel(BROADCAST_CAP);
         Arc::new(Self {
             index: RwLock::new(HashMap::new()),
             head_block_number: AtomicU64::new(0),
+            blacklist: Blacklist::with_defaults(),
+            whitelist: Whitelist::new(),
             tx,
+            wl_tx,
         })
+    }
+
+    pub fn blacklist(&self) -> &Blacklist {
+        &self.blacklist
+    }
+
+    pub fn whitelist(&self) -> &Whitelist {
+        &self.whitelist
     }
 
     pub fn set_head_block_number(&self, block_number: u64) {
@@ -49,6 +65,19 @@ impl MempoolArbHub {
         self.tx.subscribe()
     }
 
+    pub fn subscribe_whitelisted(&self) -> broadcast::Receiver<PendingArbTxEvent> {
+        self.wl_tx.subscribe()
+    }
+
+    fn selector_of<T: PoolTransaction>(vtx: &ValidPoolTransaction<T>) -> Option<[u8; 4]> {
+        let input = vtx.transaction.input();
+        if input.len() >= 4 {
+            Some([input[0], input[1], input[2], input[3]])
+        } else {
+            None
+        }
+    }
+
     pub fn on_pending_added<T: PoolTransaction>(
         &self,
         vtx: &ValidPoolTransaction<T>,
@@ -56,7 +85,17 @@ impl MempoolArbHub {
         head_block: u64,
         action: &str,
     ) {
-        if !super::filter::should_track(vtx) {
+        let selector = Self::selector_of(vtx);
+
+        // Whitelist channel: if whitelist is non-empty, push matching selectors.
+        if !self.whitelist.is_empty() {
+            if selector.map_or(false, |s| self.whitelist.contains(s)) {
+                let event = build_event(vtx, base_fee, pending_block_number(head_block), action);
+                self.upsert_whitelisted(event);
+            }
+        }
+
+        if !super::filter::should_track(vtx, &self.blacklist) {
             return;
         }
         let event = build_event(vtx, base_fee, pending_block_number(head_block), action);
@@ -69,11 +108,13 @@ impl MempoolArbHub {
             index.remove(&tx_hash).is_some()
         };
         if was_tracked {
-            let _ = self.tx.send(PendingArbTxEvent::removed(
+            let removed = PendingArbTxEvent::removed(
                 tx_hash,
                 pending_block_number(head_block),
                 now_ms(),
-            ));
+            );
+            let _ = self.tx.send(removed.clone());
+            let _ = self.wl_tx.send(removed);
         }
     }
 
@@ -93,6 +134,10 @@ impl MempoolArbHub {
             }
         }
         let _ = self.tx.send(event);
+    }
+
+    fn upsert_whitelisted(&self, event: PendingArbTxEvent) {
+        let _ = self.wl_tx.send(event);
     }
 
     pub fn snapshot(&self, filter: PendingArbSnapshotFilter) -> PendingArbSnapshot {

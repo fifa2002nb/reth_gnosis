@@ -1,12 +1,13 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+
 /// Gas limit of a plain ETH transfer.
 pub const PLAIN_TRANSFER_GAS: u64 = 21_000;
 
-/// Common non-arb selectors — blacklist only.
-///
-/// Curated from Gnosis mainnet block samples (incl. block 46909625): ERC20 ops,
-/// DEX swaps, AA/Safe, Shutter, CoW settlement, oracles, and other high-frequency
-/// infra txs that are not MEV arb competitors.
-const BLACKLIST_SELECTORS: &[[u8; 4]] = &[
+/// Default blacklist seeded at startup.
+const DEFAULT_BLACKLIST: &[[u8; 4]] = &[
     // ERC-20 / ERC-721
     [0xa9, 0x05, 0x9c, 0xbb], // transfer(address,uint256)
     [0x09, 0x5e, 0xa7, 0xb3], // approve(address,uint256)
@@ -70,8 +71,86 @@ const BLACKLIST_SELECTORS: &[[u8; 4]] = &[
     [0x5f, 0xb4, 0x20, 0xce], // frequent, contract-specific
 ];
 
-pub fn is_blacklisted_selector(selector: [u8; 4]) -> bool {
-    BLACKLIST_SELECTORS.contains(&selector)
+/// Runtime-mutable selector blacklist, shared between monitor and RPC.
+#[derive(Debug, Clone)]
+pub struct Blacklist {
+    inner: Arc<ArcSwap<HashSet<[u8; 4]>>>,
+}
+
+impl Blacklist {
+    pub fn with_defaults() -> Self {
+        let set: HashSet<[u8; 4]> = DEFAULT_BLACKLIST.iter().copied().collect();
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(set)),
+        }
+    }
+
+    pub fn contains(&self, selector: [u8; 4]) -> bool {
+        self.inner.load().contains(&selector)
+    }
+
+    pub fn add(&self, selectors: &[[u8; 4]]) {
+        let mut next = (**self.inner.load()).clone();
+        next.extend(selectors.iter().copied());
+        self.inner.store(Arc::new(next));
+    }
+
+    pub fn remove(&self, selectors: &[[u8; 4]]) {
+        let mut next = (**self.inner.load()).clone();
+        for s in selectors {
+            next.remove(s);
+        }
+        self.inner.store(Arc::new(next));
+    }
+
+    pub fn snapshot(&self) -> Vec<[u8; 4]> {
+        let mut v: Vec<[u8; 4]> = self.inner.load().iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
+}
+
+/// Selector whitelist: when non-empty, only txs whose selector is in the
+/// whitelist are pushed to the whitelist broadcast channel.
+#[derive(Debug, Clone, Default)]
+pub struct Whitelist {
+    inner: Arc<ArcSwap<HashSet<[u8; 4]>>>,
+}
+
+impl Whitelist {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(HashSet::new())),
+        }
+    }
+
+    pub fn contains(&self, selector: [u8; 4]) -> bool {
+        self.inner.load().contains(&selector)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.load().is_empty()
+    }
+
+    pub fn add(&self, selectors: &[[u8; 4]]) {
+        let mut next = (**self.inner.load()).clone();
+        next.extend(selectors.iter().copied());
+        self.inner.store(Arc::new(next));
+    }
+
+    pub fn remove(&self, selectors: &[[u8; 4]]) {
+        let mut next = (**self.inner.load()).clone();
+        for s in selectors {
+            next.remove(s);
+        }
+        self.inner.store(Arc::new(next));
+    }
+
+    pub fn snapshot(&self) -> Vec<[u8; 4]> {
+        let mut v: Vec<[u8; 4]> = self.inner.load().iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
 }
 
 #[cfg(test)]
@@ -79,11 +158,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blacklists_common_selectors() {
-        assert!(is_blacklisted_selector([0xa9, 0x05, 0x9c, 0xbb]));
-        assert!(is_blacklisted_selector([0x38, 0xed, 0x17, 0x39]));
-        assert!(is_blacklisted_selector([0x76, 0x5e, 0x82, 0x7f]));
-        assert!(is_blacklisted_selector([0x23, 0xc6, 0x40, 0xe7]));
-        assert!(!is_blacklisted_selector([0x91, 0x25, 0x2c, 0x55])); // executePath
+    fn blacklist_default_and_mutation() {
+        let bl = Blacklist::with_defaults();
+        assert!(bl.contains([0xa9, 0x05, 0x9c, 0xbb]));
+        assert!(bl.contains([0x38, 0xed, 0x17, 0x39]));
+        assert!(!bl.contains([0x91, 0x25, 0x2c, 0x55])); // executePath
+
+        bl.add(&[[0x91, 0x25, 0x2c, 0x55]]);
+        assert!(bl.contains([0x91, 0x25, 0x2c, 0x55]));
+
+        bl.remove(&[[0xa9, 0x05, 0x9c, 0xbb]]);
+        assert!(!bl.contains([0xa9, 0x05, 0x9c, 0xbb]));
+    }
+
+    #[test]
+    fn whitelist_starts_empty_and_matches() {
+        let wl = Whitelist::new();
+        assert!(wl.is_empty());
+        assert!(!wl.contains([0x91, 0x25, 0x2c, 0x55]));
+
+        wl.add(&[[0x91, 0x25, 0x2c, 0x55]]);
+        assert!(!wl.is_empty());
+        assert!(wl.contains([0x91, 0x25, 0x2c, 0x55]));
+
+        wl.remove(&[[0x91, 0x25, 0x2c, 0x55]]);
+        assert!(wl.is_empty());
     }
 }

@@ -74,6 +74,7 @@ reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0" }
 # reth independent crates
 reth-primitives-traits = { version = "0.3.1", default-features = false }
 
+arc-swap = "1"
 eyre = "0.6"
 clap = { version = "4", features = ["derive"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros", "jsonrpsee-types"] }

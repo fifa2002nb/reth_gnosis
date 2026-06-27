@@ -25,10 +25,19 @@ impl From<SubscriptionSerializeError> for jsonrpsee::types::ErrorObject<'static>
 }
 
 /// WS: `reth_subscribePendingArbTx(filter?)` — realtime pending tip changelog.
+/// Pushes txs that pass the **blacklist** filter.
 #[rpc(server, namespace = "reth")]
 pub trait MempoolArbPubSubApi {
     #[subscription(name = "subscribePendingArbTx", item = PendingArbTxEvent)]
     fn subscribe_pending_arb_tx(
+        &self,
+        filter: PendingArbFilter,
+    ) -> SubscriptionResult;
+
+    /// WS: `reth_subscribeWhitelistedArbTx(filter?)` — realtime pending tip changelog.
+    /// Pushes only txs whose selector matches the runtime **whitelist**.
+    #[subscription(name = "subscribeWhitelistedArbTx", item = PendingArbTxEvent)]
+    fn subscribe_whitelisted_arb_tx(
         &self,
         filter: PendingArbFilter,
     ) -> SubscriptionResult;
@@ -59,7 +68,27 @@ impl MempoolArbPubSubApiServer for MempoolArbPubSub {
                     return;
                 }
             };
-            let stream = filtered_event_stream(hub, filter);
+            let stream = filtered_event_stream(hub, filter, false);
+            let _ = pipe_subscription(sink, stream).await;
+        });
+        Ok(())
+    }
+
+    fn subscribe_whitelisted_arb_tx(
+        &self,
+        pending: PendingSubscriptionSink,
+        filter: PendingArbFilter,
+    ) -> SubscriptionResult {
+        let hub = self.hub.clone();
+        tokio::spawn(async move {
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                Err(err) => {
+                    tracing::warn!(target: "rpc::reth", %err, "reth_subscribeWhitelistedArbTx accept failed");
+                    return;
+                }
+            };
+            let stream = filtered_event_stream(hub, filter, true);
             let _ = pipe_subscription(sink, stream).await;
         });
         Ok(())
@@ -69,8 +98,14 @@ impl MempoolArbPubSubApiServer for MempoolArbPubSub {
 fn filtered_event_stream(
     hub: Arc<MempoolArbHub>,
     filter: PendingArbFilter,
+    whitelisted: bool,
 ) -> impl Stream<Item = PendingArbTxEvent> + Unpin {
-    BroadcastStream::new(hub.subscribe()).filter_map(move |msg| {
+    let rx = if whitelisted {
+        hub.subscribe_whitelisted()
+    } else {
+        hub.subscribe()
+    };
+    BroadcastStream::new(rx).filter_map(move |msg| {
         ready(match msg {
             Ok(evt) if matches_filter(&filter, &evt) => Some(evt),
             _ => None,
