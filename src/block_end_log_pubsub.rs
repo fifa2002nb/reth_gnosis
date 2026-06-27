@@ -34,6 +34,7 @@ pub enum BlockEndLogEvent {
     BlockEnd {
         #[serde(rename = "blockNumber", with = "alloy_serde::quantity")]
         block_number: u64,
+        #[serde(rename = "blockHash")]
         block_hash: B256,
         #[serde(rename = "blockTimestamp", with = "alloy_serde::quantity")]
         block_timestamp: u64,

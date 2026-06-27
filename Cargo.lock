@@ -9275,6 +9275,7 @@ dependencies = [
  "reth-stages-types",
  "reth-static-file-types",
  "reth-storage-api",
+ "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie",

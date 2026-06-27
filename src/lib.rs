@@ -8,6 +8,7 @@ use jsonrpsee::Methods;
 use reth::api::{AddOnsContext, FullNodeComponents};
 use reth_node_builder::rpc::RpcContext;
 use reth_rpc::eth::EthApiTypes;
+use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_consensus::FullConsensus;
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
@@ -32,6 +33,10 @@ use crate::{
     engine::{GnosisEngineTypes, GnosisEngineValidator},
     fork_simulation::{ForkSimulationApiServer, ForkSimulationImpl},
     block_end_log_pubsub::{BlockEndLogPubSub, BlockEndLogPubSubApiServer},
+    mempool_arb::{
+        spawn_monitor, MempoolArbApiServer, MempoolArbHub, MempoolArbPubSub,
+        MempoolArbPubSubApiServer, MempoolArbRpc,
+    },
     payload::GnosisBuiltPayload,
     primitives::{
         block::{BlockBody, GnosisBlock, TransactionSigned},
@@ -47,6 +52,7 @@ pub mod block;
 mod build;
 mod fork_simulation;
 mod block_end_log_pubsub;
+mod mempool_arb;
 
 /// Register `eth_forkSyncStatus`, `eth_callAtBlock`, `eth_callScriptAtBlock`, and
 /// `arb_simulateArbitrageAtBlock` into the configured HTTP/WS/IPC transports.
@@ -60,25 +66,42 @@ pub fn register_fork_simulation_rpc<Node, EthApi>(
 where
     Node: FullNodeComponents<Evm = GnosisEvmConfig>,
     EthApi: EthApiTypes,
+    <Node as FullNodeComponents>::Pool:
+        TransactionPool<Transaction: PoolTransaction> + Clone + Send + Sync + 'static,
     Node::Provider: BlockNumReader
         + BlockHashReader
         + HeaderProvider<Header = GnosisHeader>
         + StateProviderFactory
         + CanonStateSubscriptions<Primitives = GnosisNodePrimitives>
+        + BlockNumReader
         + Clone
         + Send
         + Sync
         + 'static,
 {
     let provider = ctx.node().provider().clone();
+    let pool = ctx.node().pool().clone();
     let evm_config = ctx.node().evm_config().clone();
     let fork_sim = ForkSimulationImpl::new(provider.clone(), evm_config.clone());
     let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config);
-    let log_pubsub = BlockEndLogPubSub::new(provider);
+    let log_pubsub = BlockEndLogPubSub::new(provider.clone());
+
+    let mempool_hub = MempoolArbHub::new();
+    spawn_monitor(
+        ctx.node().task_executor(),
+        pool.clone(),
+        provider.clone(),
+        mempool_hub.clone(),
+    );
+    let mempool_pubsub = MempoolArbPubSub::new(mempool_hub.clone());
+    let mempool_rpc = MempoolArbRpc::new(mempool_hub);
+
     let mut methods = Methods::new();
     methods.merge(log_pubsub.into_rpc())?;
     methods.merge(fork_sim.into_rpc())?;
     methods.merge(arb_sim.into_rpc())?;
+    methods.merge(mempool_pubsub.into_rpc())?;
+    methods.merge(mempool_rpc.into_rpc())?;
     ctx.modules.merge_configured(methods)?;
     Ok(())
 }
