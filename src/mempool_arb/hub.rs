@@ -64,15 +64,17 @@ impl MempoolArbHub {
     }
 
     pub fn on_removed(&self, tx_hash: B256, head_block: u64) {
-        {
+        let was_tracked = {
             let mut index = self.index.write().expect("mempool tip index lock");
-            index.remove(&tx_hash);
+            index.remove(&tx_hash).is_some()
+        };
+        if was_tracked {
+            let _ = self.tx.send(PendingArbTxEvent::removed(
+                tx_hash,
+                pending_block_number(head_block),
+                now_ms(),
+            ));
         }
-        let _ = self.tx.send(PendingArbTxEvent::removed(
-            tx_hash,
-            pending_block_number(head_block),
-            now_ms(),
-        ));
     }
 
     fn upsert(&self, event: PendingArbTxEvent) {
