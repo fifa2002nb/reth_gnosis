@@ -6,13 +6,19 @@ use serde::{Deserialize, Serialize};
 use super::hub::MempoolArbHub;
 use super::types::{PendingArbSnapshot, PendingArbSnapshotFilter};
 
-/// Request body for blacklist add/remove — selectors as hex strings ("0x91252c55").
+/// Request body for blacklist add/remove — selectors as hex strings ("0xa9059cbb").
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlacklistUpdate {
     pub selectors: Vec<String>,
 }
 
-/// HTTP RPC: snapshot + dynamic blacklist management.
+/// Request body for whitelist add/remove — addresses as hex strings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WhitelistUpdate {
+    pub addresses: Vec<String>,
+}
+
+/// HTTP RPC: snapshot + dynamic blacklist/whitelist management.
 #[rpc(server, namespace = "reth")]
 pub trait MempoolArbApi {
     #[method(name = "getPendingArbSnapshot")]
@@ -33,15 +39,15 @@ pub trait MempoolArbApi {
     #[method(name = "getArbBlacklist")]
     fn get_arb_blacklist(&self) -> RpcResult<Vec<String>>;
 
-    /// Add selectors to the runtime whitelist.
+    /// Add addresses (from/to) to the runtime whitelist.
     #[method(name = "addArbWhitelist")]
-    fn add_arb_whitelist(&self, update: BlacklistUpdate) -> RpcResult<Vec<String>>;
+    fn add_arb_whitelist(&self, update: WhitelistUpdate) -> RpcResult<Vec<String>>;
 
-    /// Remove selectors from the runtime whitelist.
+    /// Remove addresses from the runtime whitelist.
     #[method(name = "removeArbWhitelist")]
-    fn remove_arb_whitelist(&self, update: BlacklistUpdate) -> RpcResult<Vec<String>>;
+    fn remove_arb_whitelist(&self, update: WhitelistUpdate) -> RpcResult<Vec<String>>;
 
-    /// List current whitelist selectors.
+    /// List current whitelist addresses.
     #[method(name = "getArbWhitelist")]
     fn get_arb_whitelist(&self) -> RpcResult<Vec<String>>;
 }
@@ -79,6 +85,20 @@ fn selectors_to_hex(selectors: &[[u8; 4]]) -> Vec<String> {
         .collect()
 }
 
+fn parse_addresses(hex_strs: &[String]) -> Result<Vec<alloy_primitives::Address>, String> {
+    hex_strs
+        .iter()
+        .map(|s| {
+            s.parse::<alloy_primitives::Address>()
+                .map_err(|e| format!("invalid address {s}: {e}"))
+        })
+        .collect()
+}
+
+fn addresses_to_hex(addrs: &[alloy_primitives::Address]) -> Vec<String> {
+    addrs.iter().map(|a| format!("{a}")).collect()
+}
+
 impl MempoolArbApiServer for MempoolArbRpc {
     fn get_pending_arb_snapshot(
         &self,
@@ -105,21 +125,21 @@ impl MempoolArbApiServer for MempoolArbRpc {
         Ok(selectors_to_hex(&self.hub.blacklist().snapshot()))
     }
 
-    fn add_arb_whitelist(&self, update: BlacklistUpdate) -> RpcResult<Vec<String>> {
-        let selectors = parse_selectors(&update.selectors)
+    fn add_arb_whitelist(&self, update: WhitelistUpdate) -> RpcResult<Vec<String>> {
+        let addrs = parse_addresses(&update.addresses)
             .map_err(|msg| jsonrpsee::types::ErrorObject::owned(-32602, msg, None::<()>))?;
-        self.hub.whitelist().add(&selectors);
-        Ok(selectors_to_hex(&self.hub.whitelist().snapshot()))
+        self.hub.whitelist().add(&addrs);
+        Ok(addresses_to_hex(&self.hub.whitelist().snapshot()))
     }
 
-    fn remove_arb_whitelist(&self, update: BlacklistUpdate) -> RpcResult<Vec<String>> {
-        let selectors = parse_selectors(&update.selectors)
+    fn remove_arb_whitelist(&self, update: WhitelistUpdate) -> RpcResult<Vec<String>> {
+        let addrs = parse_addresses(&update.addresses)
             .map_err(|msg| jsonrpsee::types::ErrorObject::owned(-32602, msg, None::<()>))?;
-        self.hub.whitelist().remove(&selectors);
-        Ok(selectors_to_hex(&self.hub.whitelist().snapshot()))
+        self.hub.whitelist().remove(&addrs);
+        Ok(addresses_to_hex(&self.hub.whitelist().snapshot()))
     }
 
     fn get_arb_whitelist(&self) -> RpcResult<Vec<String>> {
-        Ok(selectors_to_hex(&self.hub.whitelist().snapshot()))
+        Ok(addresses_to_hex(&self.hub.whitelist().snapshot()))
     }
 }

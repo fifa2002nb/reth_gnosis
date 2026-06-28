@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use alloy_primitives::Address;
 use arc_swap::ArcSwap;
 
 /// Gas limit of a plain ETH transfer.
@@ -110,11 +111,11 @@ impl Blacklist {
     }
 }
 
-/// Selector whitelist: when non-empty, only txs whose selector is in the
+/// Address whitelist: when non-empty, only txs whose `from` OR `to` is in the
 /// whitelist are pushed to the whitelist broadcast channel.
 #[derive(Debug, Clone, Default)]
 pub struct Whitelist {
-    inner: Arc<ArcSwap<HashSet<[u8; 4]>>>,
+    inner: Arc<ArcSwap<HashSet<Address>>>,
 }
 
 impl Whitelist {
@@ -124,30 +125,35 @@ impl Whitelist {
         }
     }
 
-    pub fn contains(&self, selector: [u8; 4]) -> bool {
-        self.inner.load().contains(&selector)
+    /// Returns true if `from` or `to` is in the whitelist.
+    pub fn matches(&self, from: Address, to: Option<Address>) -> bool {
+        let guard = self.inner.load();
+        if guard.contains(&from) {
+            return true;
+        }
+        to.map_or(false, |t| guard.contains(&t))
     }
 
     pub fn is_empty(&self) -> bool {
         self.inner.load().is_empty()
     }
 
-    pub fn add(&self, selectors: &[[u8; 4]]) {
+    pub fn add(&self, addrs: &[Address]) {
         let mut next = (**self.inner.load()).clone();
-        next.extend(selectors.iter().copied());
+        next.extend(addrs.iter().copied());
         self.inner.store(Arc::new(next));
     }
 
-    pub fn remove(&self, selectors: &[[u8; 4]]) {
+    pub fn remove(&self, addrs: &[Address]) {
         let mut next = (**self.inner.load()).clone();
-        for s in selectors {
-            next.remove(s);
+        for a in addrs {
+            next.remove(a);
         }
         self.inner.store(Arc::new(next));
     }
 
-    pub fn snapshot(&self) -> Vec<[u8; 4]> {
-        let mut v: Vec<[u8; 4]> = self.inner.load().iter().copied().collect();
+    pub fn snapshot(&self) -> Vec<Address> {
+        let mut v: Vec<Address> = self.inner.load().iter().copied().collect();
         v.sort_unstable();
         v
     }
@@ -175,13 +181,27 @@ mod tests {
     fn whitelist_starts_empty_and_matches() {
         let wl = Whitelist::new();
         assert!(wl.is_empty());
-        assert!(!wl.contains([0x91, 0x25, 0x2c, 0x55]));
 
-        wl.add(&[[0x91, 0x25, 0x2c, 0x55]]);
+        let mine = "0x3c1C687A583BaFf0b516761e46c01E39658A9220"
+            .parse()
+            .unwrap();
+        let other = "0x2dA3cEf02d38d21020B859ED546aaf020f3cF5A8"
+            .parse()
+            .unwrap();
+
+        // matches from
+        wl.add(&[mine]);
         assert!(!wl.is_empty());
-        assert!(wl.contains([0x91, 0x25, 0x2c, 0x55]));
+        assert!(wl.matches(mine, Some(other)));
+        // matches to
+        assert!(wl.matches(other, Some(mine)));
+        // no match
+        let unknown = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        assert!(!wl.matches(unknown, Some(unknown)));
 
-        wl.remove(&[[0x91, 0x25, 0x2c, 0x55]]);
+        wl.remove(&[mine]);
         assert!(wl.is_empty());
     }
 }

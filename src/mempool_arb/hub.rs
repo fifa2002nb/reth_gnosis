@@ -69,15 +69,6 @@ impl MempoolArbHub {
         self.wl_tx.subscribe()
     }
 
-    fn selector_of<T: PoolTransaction>(vtx: &ValidPoolTransaction<T>) -> Option<[u8; 4]> {
-        let input = vtx.transaction.input();
-        if input.len() >= 4 {
-            Some([input[0], input[1], input[2], input[3]])
-        } else {
-            None
-        }
-    }
-
     pub fn on_pending_added<T: PoolTransaction>(
         &self,
         vtx: &ValidPoolTransaction<T>,
@@ -85,11 +76,12 @@ impl MempoolArbHub {
         head_block: u64,
         action: &str,
     ) {
-        let selector = Self::selector_of(vtx);
+        let from = vtx.sender();
+        let to = vtx.to();
 
-        // Whitelist channel: if whitelist is non-empty, push matching selectors.
+        // Whitelist channel: if whitelist is non-empty, push txs whose from OR to matches.
         if !self.whitelist.is_empty() {
-            if selector.map_or(false, |s| self.whitelist.contains(s)) {
+            if self.whitelist.matches(from, to) {
                 let event = build_event(vtx, base_fee, pending_block_number(head_block), action);
                 self.upsert_whitelisted(event);
             }
@@ -169,6 +161,8 @@ impl MempoolArbHub {
                 max_priority_fee_per_gas: evt.max_priority_fee_per_gas,
                 effective_tip_per_gas: evt.effective_tip_per_gas,
                 priority_cost: evt.priority_cost,
+                tx_type: evt.tx_type,
+                input: evt.input,
                 block_number: evt.block_number,
             })
             .collect();
@@ -197,6 +191,8 @@ fn build_event<T: PoolTransaction>(
         .unwrap_or(U256::ZERO);
     let gas = U256::from(vtx.gas_limit());
     let priority_cost = effective.saturating_mul(gas);
+    let tx_type = vtx.transaction.ty();
+    let input = vtx.transaction.input().clone();
 
     PendingArbTxEvent {
         kind: "tx".to_string(),
@@ -210,6 +206,8 @@ fn build_event<T: PoolTransaction>(
         max_priority_fee_per_gas: max_priority,
         effective_tip_per_gas: effective,
         priority_cost,
+        tx_type,
+        input,
         block_number,
         received_at_ms: now_ms(),
     }

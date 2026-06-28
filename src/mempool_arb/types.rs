@@ -1,5 +1,10 @@
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
+
+/// Skip-empty serializer helper for `Bytes` (works around ambiguous method resolution).
+fn bytes_is_empty(b: &Bytes) -> bool {
+    b.as_ref().is_empty()
+}
 
 /// Changelog event pushed over `reth_subscribePendingArbTx`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +24,12 @@ pub struct PendingArbTxEvent {
     pub max_priority_fee_per_gas: U256,
     pub effective_tip_per_gas: U256,
     pub priority_cost: U256,
+    /// EIP-2718 transaction type (0 = legacy, 1 = 2930, 2 = 1559, ...).
+    #[serde(with = "alloy_serde::quantity")]
+    pub tx_type: u8,
+    /// Full transaction calldata (hex 0x...).
+    #[serde(default, skip_serializing_if = "bytes_is_empty")]
+    pub input: Bytes,
     /// Target block these pending txs compete for (`head + 1`).
     #[serde(with = "alloy_serde::quantity")]
     pub block_number: u64,
@@ -40,6 +51,8 @@ impl PendingArbTxEvent {
             max_priority_fee_per_gas: U256::ZERO,
             effective_tip_per_gas: U256::ZERO,
             priority_cost: U256::ZERO,
+            tx_type: 0,
+            input: Bytes::default(),
             block_number,
             received_at_ms,
         }
@@ -77,6 +90,12 @@ pub struct PendingArbSnapshotEntry {
     pub max_priority_fee_per_gas: U256,
     pub effective_tip_per_gas: U256,
     pub priority_cost: U256,
+    /// EIP-2718 transaction type (0 = legacy, 1 = 2930, 2 = 1559, ...).
+    #[serde(with = "alloy_serde::quantity")]
+    pub tx_type: u8,
+    /// Full transaction calldata (hex 0x...).
+    #[serde(default, skip_serializing_if = "bytes_is_empty")]
+    pub input: Bytes,
     #[serde(with = "alloy_serde::quantity")]
     pub block_number: u64,
 }
