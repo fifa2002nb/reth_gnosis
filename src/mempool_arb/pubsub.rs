@@ -35,7 +35,8 @@ pub trait MempoolArbPubSubApi {
     ) -> SubscriptionResult;
 
     /// WS: `reth_subscribeWhitelistedArbTx(filter?)` — realtime pending tip changelog.
-    /// Pushes only txs whose selector matches the runtime **whitelist**.
+    /// Pushes only `added`/`replaced` txs whose from/to matches the runtime
+    /// **whitelist**; `removed` events are not emitted on this subscription.
     #[subscription(name = "subscribeWhitelistedArbTx", item = PendingArbTxEvent)]
     fn subscribe_whitelisted_arb_tx(
         &self,

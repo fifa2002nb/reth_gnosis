@@ -105,8 +105,9 @@ impl MempoolArbHub {
                 pending_block_number(head_block),
                 now_ms(),
             );
-            let _ = self.tx.send(removed.clone());
-            let _ = self.wl_tx.send(removed);
+            // Whitelisted subscribers only get "added"/"replaced"; "removed" isn't
+            // reliably whitelist-filtered (no dedicated whitelist index), so drop it.
+            let _ = self.tx.send(removed);
         }
     }
 
