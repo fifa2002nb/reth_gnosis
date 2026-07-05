@@ -471,11 +471,6 @@ where
         &self,
         request: ArbitrageSimRequest,
     ) -> RpcResult<ArbitrageSimResult> {
-        tracing::info!(
-            block = request.block_number,
-            use_flash_loan = request.use_flash_loan,
-            "arb_simulateArbitrageAtBlock request"
-        );
         if request.use_flash_loan {
             let has_v2 = request.flash_loan_pair.is_some();
             let has_v3 = request.flash_loan_pool.is_some();
@@ -604,12 +599,10 @@ where
             authorization_list: Default::default(),
         };
 
-        tracing::info!(block = request.block_number, "step: CREATE arb");
         let create_result = evm.transact(create_tx).map_err(|e| {
             ErrorObjectOwned::owned(-32000, format!("CREATE failed: {}", e), None::<()>)
         })?;
         let create_gas = create_result.result.tx_gas_used();
-        tracing::info!(gas = create_gas, "step: CREATE done");
 
         if let ExecutionResult::Revert { output, .. } = &create_result.result {
             return Ok(ArbitrageSimResult {
@@ -744,7 +737,6 @@ where
             tracing::info!(balance = %bal, "arb balance before executePath");
         }
 
-        tracing::info!("step: executePath");
         let call_result = if request.use_flash_loan {
             let (selector, calldata_params): ([u8; 4], Vec<u8>) = if let Some(pair) = request.flash_loan_pair {
                 let amount0_out = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
