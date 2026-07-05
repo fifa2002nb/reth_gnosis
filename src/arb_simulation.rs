@@ -20,10 +20,12 @@ use revm_primitives::TxKind;
 use revm_primitives::hardfork::SpecId;
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm_state::AccountInfo;
+use std::sync::Arc;
 
 use tracing;
 
 use crate::blobs::CANCUN_BLOB_PARAMS;
+use crate::block_state_cache::BlockStateCache;
 use crate::evm_config::GnosisEvmConfig;
 
 const TX_GAS_LIMIT: u64 = 30_000_000;
@@ -438,13 +440,19 @@ pub trait ArbitrageSimulationApi {
 pub struct ArbitrageSimulationImpl<Provider> {
     provider: Provider,
     evm_config: GnosisEvmConfig,
+    block_state_cache: Arc<BlockStateCache>,
 }
 
 impl<Provider> ArbitrageSimulationImpl<Provider> {
-    pub fn new(provider: Provider, evm_config: GnosisEvmConfig) -> Self {
+    pub fn new(
+        provider: Provider,
+        evm_config: GnosisEvmConfig,
+        block_state_cache: Arc<BlockStateCache>,
+    ) -> Self {
         Self {
             provider,
             evm_config,
+            block_state_cache,
         }
     }
 }
@@ -489,28 +497,14 @@ where
                 .ok_or_else(|| ErrorObjectOwned::owned(-32602, "initialAmount required when useFlashLoan=false", None::<()>))?;
         }
 
-        let block_hash = self
-            .provider
-            .block_hash(request.block_number)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
-
-        let header = self
-            .provider
-            .header(block_hash)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
-
-        let state_provider = self
-            .provider
-            .history_by_block_hash(block_hash)
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32000, format!("State not available: {}", e), None::<()>)
-            })?;
+        let checked_out = self
+            .block_state_cache
+            .checkout(&self.provider, request.block_number)?;
+        let header = checked_out.header();
 
         let mut evm_env = self
             .evm_config
-            .evm_env(&header)
+            .evm_env(header)
             .map_err(|e| ErrorObjectOwned::owned(-32000, format!("EVM env error: {}", e), None::<()>))?;
 
         // `goodboy/foundry/bsc-arbi-sim/foundry.toml` 使用 evm_version = "cancun"。历史块若在链上
@@ -542,7 +536,7 @@ where
         // `TX_GAS_LIMIT.min(block_gas_limit)` alone exceeds that cap and fails tx validation.
         let tx_cap = evm_env.cfg_env.tx_gas_limit_cap.unwrap_or(u64::MAX);
         let sim_tx_gas_limit = TX_GAS_LIMIT.min(block_gas_limit).min(tx_cap);
-        let state_db = StateProviderDatabase::new(&state_provider);
+        let state_db = StateProviderDatabase::new(checked_out.provider());
         let mut cache_db = CacheDB::new(state_db);
 
         let arb_deployer: Address = Address::from_slice(&[

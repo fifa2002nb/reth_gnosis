@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use crate::{
     arb_simulation::{ArbitrageSimulationApiServer, ArbitrageSimulationImpl},
+    block_state_cache::BlockStateCache,
     engine::{GnosisEngineTypes, GnosisEngineValidator},
     fork_simulation::{ForkSimulationApiServer, ForkSimulationImpl},
     block_end_log_pubsub::{BlockEndLogPubSub, BlockEndLogPubSubApiServer},
@@ -48,6 +49,7 @@ use crate::{
 pub mod aura;
 mod arb_simulation;
 mod blobs;
+mod block_state_cache;
 pub mod block;
 mod build;
 mod fork_simulation;
@@ -82,8 +84,11 @@ where
     let provider = ctx.node().provider().clone();
     let pool = ctx.node().pool().clone();
     let evm_config = ctx.node().evm_config().clone();
-    let fork_sim = ForkSimulationImpl::new(provider.clone(), evm_config.clone());
-    let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config);
+    // Shared so a burst of eth_callAtBlock/eth_callScriptAtBlock/arb_simulateArbitrageAtBlock
+    // calls against the same block reuse resolved state instead of each opening a fresh DB read tx.
+    let block_state_cache = BlockStateCache::new();
+    let fork_sim = ForkSimulationImpl::new(provider.clone(), evm_config.clone(), block_state_cache.clone());
+    let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config, block_state_cache);
     let log_pubsub = BlockEndLogPubSub::new(provider.clone());
 
     let mempool_hub = MempoolArbHub::new();

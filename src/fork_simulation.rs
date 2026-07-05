@@ -14,7 +14,9 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use revm::context::TxEnv;
 use revm::context::result::ExecutionResult;
 use revm_primitives::TxKind;
+use std::sync::Arc;
 
+use crate::block_state_cache::BlockStateCache;
 use crate::evm_config::GnosisEvmConfig;
 
 const TX_GAS_LIMIT: u64 = 30_000_000;
@@ -77,13 +79,19 @@ pub trait ForkSimulationApi {
 pub struct ForkSimulationImpl<Provider> {
     provider: Provider,
     evm_config: GnosisEvmConfig,
+    block_state_cache: Arc<BlockStateCache>,
 }
 
 impl<Provider> ForkSimulationImpl<Provider> {
-    pub fn new(provider: Provider, evm_config: GnosisEvmConfig) -> Self {
+    pub fn new(
+        provider: Provider,
+        evm_config: GnosisEvmConfig,
+        block_state_cache: Arc<BlockStateCache>,
+    ) -> Self {
         Self {
             provider,
             evm_config,
+            block_state_cache,
         }
     }
 }
@@ -116,31 +124,15 @@ where
     }
 
     fn call_at_block(&self, call: CallRequest, block_number: u64) -> RpcResult<CallResult> {
-        let block_hash = self
-            .provider
-            .block_hash(block_number)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
+        let checked_out = self.block_state_cache.checkout(&self.provider, block_number)?;
+        let header = checked_out.header();
 
-        let header = self
-            .provider
-            .header(block_hash)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
-
-        let state_provider = self
-            .provider
-            .history_by_block_hash(block_hash)
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32000, format!("State not available: {}", e), None::<()>)
-            })?;
-
-        let state_db = StateProviderDatabase::new(&state_provider);
+        let state_db = StateProviderDatabase::new(checked_out.provider());
         let db = State::builder().with_database(state_db).build();
 
         let evm_env = self
             .evm_config
-            .evm_env(&header)
+            .evm_env(header)
             .map_err(|e| ErrorObjectOwned::owned(-32000, format!("EVM env error: {}", e), None::<()>))?;
 
         let basefee = evm_env.block_env.basefee;
@@ -199,31 +191,15 @@ where
     }
 
     fn call_script_at_block(&self, bytecode: Bytes, block_number: u64) -> RpcResult<CallResult> {
-        let block_hash = self
-            .provider
-            .block_hash(block_number)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
+        let checked_out = self.block_state_cache.checkout(&self.provider, block_number)?;
+        let header = checked_out.header();
 
-        let header = self
-            .provider
-            .header(block_hash)
-            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("Provider error: {}", e), None::<()>))?
-            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "Block not found", None::<()>))?;
-
-        let state_provider = self
-            .provider
-            .history_by_block_hash(block_hash)
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32000, format!("State not available: {}", e), None::<()>)
-            })?;
-
-        let state_db = StateProviderDatabase::new(&state_provider);
+        let state_db = StateProviderDatabase::new(checked_out.provider());
         let db = State::builder().with_database(state_db).build();
 
         let evm_env = self
             .evm_config
-            .evm_env(&header)
+            .evm_env(header)
             .map_err(|e| ErrorObjectOwned::owned(-32000, format!("EVM env error: {}", e), None::<()>))?;
 
         let basefee = evm_env.block_env.basefee;
