@@ -75,8 +75,13 @@ where
         // 取得 TransactionsHandle（async oneshot 到 NetworkManager），缓存到进程级单例，
         // 供 `arb_sendRawTransactionFast` 快路径强制广播使用。NetworkManager 就绪后才会
         // 返回 Some；启动初期可能返回 None，此时快路径不可用（RPC 返回 -38001）。
+        //
+        // ⚠️ 必须用 spawn_task（真正 spawn + poll future）。千万不要用 spawn_drop ——
+        // 后者只是把值移到后台 "drop" 线程析构，从不 poll future，会导致 fetcher 永不执行、
+        // handle 永不就绪、arb_sendRawTransactionFast 永远返回 -38001。
         let handle_for_tx = handle.clone();
-        ctx.task_executor().spawn_drop(async move {
+        ctx.task_executor().spawn_task(async move {
+            tracing::debug!(target: "reth::cli", "fast-tx handle fetcher task started");
             match handle_for_tx.transactions_handle().await {
                 Some(tx_handle) => {
                     crate::fast_tx::set_fast_tx_handle(tx_handle);
