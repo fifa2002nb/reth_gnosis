@@ -32,6 +32,7 @@ use crate::{
     arb_simulation::{ArbitrageSimulationApiServer, ArbitrageSimulationImpl},
     block_state_cache::BlockStateCache,
     engine::{GnosisEngineTypes, GnosisEngineValidator},
+    fast_tx::{FastTxApiServer, FastTxRpc},
     fork_simulation::{ForkSimulationApiServer, ForkSimulationImpl},
     block_end_log_pubsub::{BlockEndLogPubSub, BlockEndLogPubSubApiServer},
     mempool_arb::{
@@ -52,6 +53,7 @@ mod blobs;
 mod block_state_cache;
 pub mod block;
 mod build;
+mod fast_tx;
 mod fork_simulation;
 mod block_end_log_pubsub;
 mod mempool_arb;
@@ -107,6 +109,7 @@ where
     methods.merge(arb_sim.into_rpc())?;
     methods.merge(mempool_pubsub.into_rpc())?;
     methods.merge(mempool_rpc.into_rpc())?;
+    methods.merge(FastTxRpc.into_rpc())?;
     ctx.modules.merge_configured(methods)?;
     Ok(())
 }

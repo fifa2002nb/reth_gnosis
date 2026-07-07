@@ -71,6 +71,26 @@ where
         let network = NetworkManager::builder(network_config).await?;
         let handle = ctx.start_network(network, pool);
         info!(target: "reth::cli", enode=%handle.local_node_record(), "P2P networking initialized");
+
+        // 取得 TransactionsHandle（async oneshot 到 NetworkManager），缓存到进程级单例，
+        // 供 `arb_sendRawTransactionFast` 快路径强制广播使用。NetworkManager 就绪后才会
+        // 返回 Some；启动初期可能返回 None，此时快路径不可用（RPC 返回 -38001）。
+        let handle_for_tx = handle.clone();
+        ctx.task_executor().spawn_drop(async move {
+            match handle_for_tx.transactions_handle().await {
+                Some(tx_handle) => {
+                    crate::fast_tx::set_fast_tx_handle(tx_handle);
+                    info!(target: "reth::cli", "fast-tx broadcast handle ready");
+                }
+                None => {
+                    tracing::warn!(
+                        target: "reth::cli",
+                        "transactions_handle unavailable; arb_sendRawTransactionFast disabled"
+                    );
+                }
+            }
+        });
+
         Ok(handle)
     }
 }
