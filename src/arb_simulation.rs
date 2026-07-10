@@ -59,18 +59,32 @@ fn create_address(sender: Address, nonce: u64) -> Address {
 
 /// startFlashLoan(address,uint96,uint96,bool,bytes) selector - V2
 const START_FLASH_LOAN_SELECTOR: [u8; 4] = [0x99, 0xf1, 0x80, 0x2a];
+/// startFlashLoanEnc(address,uint96,uint96,bool,bytes)
+const START_FLASH_LOAN_ENC_SELECTOR: [u8; 4] = [0xb3, 0x5f, 0xbf, 0x40];
 /// startFlashLoanV3(address,uint96,uint96,bool,bytes) selector - V3
 const START_FLASH_LOAN_V3_SELECTOR: [u8; 4] = [0xbb, 0xa5, 0x9c, 0x67];
+/// startFlashLoanV3Enc(address,uint96,uint96,bool,bytes)
+const START_FLASH_LOAN_V3_ENC_SELECTOR: [u8; 4] = [0xcd, 0xa4, 0x37, 0xaf];
 /// startFlashLoanV4(address,uint256,bool,bytes) selector — FlashArbV3V4 only
 const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
+/// startFlashLoanV4Enc(address,uint256,bool,bytes)
+const START_FLASH_LOAN_V4_ENC_SELECTOR: [u8; 4] = [0x1f, 0x8e, 0x9c, 0x0d];
 /// startFlashLoanBalancer(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Balancer V2 Vault 闪电贷
 const START_FLASH_LOAN_BALANCER_SELECTOR: [u8; 4] = [0x93, 0x8f, 0xbc, 0x15];
+/// startFlashLoanBalancerEnc(address,uint256,bool,bytes)
+const START_FLASH_LOAN_BALANCER_ENC_SELECTOR: [u8; 4] = [0xf8, 0x1c, 0xc2, 0xb0];
 /// startFlashLoanBalancerV3(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Balancer V3 Vault 闪电贷
 const START_FLASH_LOAN_BALANCER_V3_SELECTOR: [u8; 4] = [0x8f, 0x57, 0xfc, 0xdc];
+/// startFlashLoanBalancerV3Enc(address,uint256,bool,bytes)
+const START_FLASH_LOAN_BALANCER_V3_ENC_SELECTOR: [u8; 4] = [0xad, 0x34, 0xfb, 0xf0];
 /// startFlashLoanAave(address,uint256,bool,bytes) — FlashArbitrageUtraLiteUltra Aave V3 Pool 闪电贷
 const START_FLASH_LOAN_AAVE_SELECTOR: [u8; 4] = [0xf2, 0xa9, 0x86, 0xb4];
+/// startFlashLoanAaveEnc(address,uint256,bool,bytes)
+const START_FLASH_LOAN_AAVE_ENC_SELECTOR: [u8; 4] = [0x0e, 0xe6, 0xec, 0x9f];
 /// executePath(bool,bytes) selector
 const EXECUTE_PATH_SELECTOR: [u8; 4] = [0x91, 0x25, 0x2c, 0x55];
+/// executePathEnc(bool,bytes)
+const EXECUTE_PATH_ENC_SELECTOR: [u8; 4] = [0xe1, 0x24, 0x8a, 0xd3];
 /// WETH() selector: keccak256("WETH()")[0:4]
 const WETH_SELECTOR: [u8; 4] = [0xad, 0x5c, 0x46, 0x48];
 /// token0() / token1() selectors (Uniswap V2 pair / V3 pool)
@@ -359,8 +373,12 @@ pub struct ArbitrageSimRequest {
     pub is_first_last_same_eth: bool,
     /// arb 合约 init bytecode，模拟时 CREATE 部署
     pub arb_contract_bytecode: Bytes,
-    /// pathData = abi.encode(Hop[])，由调用方编码
+    /// pathData = abi.encode(Hop[])，由调用方编码；`encrypt_path_data=true` 时为 tip 绑定 XOR 密文
     pub path_data: Bytes,
+    /// true：走 *Enc 入口并对 pathData 解密。goodboy `encrypt_submit_calldata` 打开时置 true，
+    /// 使 gasUsed 含解密开销（与上链一致）。模拟侧 tipEff=0、caller=0x…02，调用方须按此加密。
+    #[serde(default)]
+    pub encrypt_path_data: bool,
     #[serde(default)]
     pub initial_token: Option<Address>,
     #[serde(default)]
@@ -738,6 +756,7 @@ where
         }
 
         let call_result = if request.use_flash_loan {
+            let enc = request.encrypt_path_data;
             let (selector, calldata_params): ([u8; 4], Vec<u8>) = if let Some(pair) = request.flash_loan_pair {
                 let amount0_out = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
                 let amount1_out = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
@@ -748,7 +767,12 @@ where
                     request.is_first_last_same_eth,
                     request.path_data.to_vec(),
                 );
-                (START_FLASH_LOAN_SELECTOR, params.abi_encode_params())
+                let sel = if enc {
+                    START_FLASH_LOAN_ENC_SELECTOR
+                } else {
+                    START_FLASH_LOAN_SELECTOR
+                };
+                (sel, params.abi_encode_params())
             } else if let Some(pool) = request.flash_loan_pool {
                 let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
                 let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
@@ -759,7 +783,12 @@ where
                     request.is_first_last_same_eth,
                     request.path_data.to_vec(),
                 );
-                (START_FLASH_LOAN_V3_SELECTOR, params.abi_encode_params())
+                let sel = if enc {
+                    START_FLASH_LOAN_V3_ENC_SELECTOR
+                } else {
+                    START_FLASH_LOAN_V3_SELECTOR
+                };
+                (sel, params.abi_encode_params())
             } else if let (Some(currency), Some(amount_str)) = (&request.flash_loan_currency, &request.flash_loan_amount) {
                 let amount: U256 = amount_str.parse().unwrap_or(U256::ZERO);
                 let params = (
@@ -768,15 +797,30 @@ where
                     request.is_first_last_same_eth,
                     request.path_data.to_vec(),
                 );
-                if use_balancer_v3_flash_selector(&request) {
-                    (START_FLASH_LOAN_BALANCER_V3_SELECTOR, params.abi_encode_params())
+                let sel = if use_balancer_v3_flash_selector(&request) {
+                    if enc {
+                        START_FLASH_LOAN_BALANCER_V3_ENC_SELECTOR
+                    } else {
+                        START_FLASH_LOAN_BALANCER_V3_SELECTOR
+                    }
                 } else if use_balancer_flash_selector(&request) {
-                    (START_FLASH_LOAN_BALANCER_SELECTOR, params.abi_encode_params())
+                    if enc {
+                        START_FLASH_LOAN_BALANCER_ENC_SELECTOR
+                    } else {
+                        START_FLASH_LOAN_BALANCER_SELECTOR
+                    }
                 } else if use_aave_flash_selector(&request) {
-                    (START_FLASH_LOAN_AAVE_SELECTOR, params.abi_encode_params())
+                    if enc {
+                        START_FLASH_LOAN_AAVE_ENC_SELECTOR
+                    } else {
+                        START_FLASH_LOAN_AAVE_SELECTOR
+                    }
+                } else if enc {
+                    START_FLASH_LOAN_V4_ENC_SELECTOR
                 } else {
-                    (START_FLASH_LOAN_V4_SELECTOR, params.abi_encode_params())
-                }
+                    START_FLASH_LOAN_V4_SELECTOR
+                };
+                (sel, params.abi_encode_params())
             } else {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -839,7 +883,12 @@ where
                 evm.db_mut().commit(fund_result.state);
             }
 
-            let mut calldata = Vec::from(EXECUTE_PATH_SELECTOR);
+            let exec_sel = if request.encrypt_path_data {
+                EXECUTE_PATH_ENC_SELECTOR
+            } else {
+                EXECUTE_PATH_SELECTOR
+            };
+            let mut calldata = Vec::from(exec_sel);
             calldata.extend_from_slice(
                 &(request.is_first_last_same_eth, request.path_data.to_vec()).abi_encode_params(),
             );
