@@ -125,6 +125,7 @@ mod network;
 mod payload;
 mod payload_builder;
 mod pool;
+mod pool_locals_propagate;
 mod primitives;
 mod rpc;
 pub mod spec;

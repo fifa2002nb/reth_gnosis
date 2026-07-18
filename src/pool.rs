@@ -14,11 +14,16 @@ use reth_node_builder::{
     BuilderContext,
 };
 use reth_transaction_pool::{
-    blobstore::DiskFileBlobStore, EthTransactionPool, TransactionValidationTaskExecutor,
+    blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
+    EthTransactionValidator, TransactionValidationTaskExecutor,
 };
 use tracing::{debug, info};
 
-use crate::{primitives::GnosisNodePrimitives, spec::gnosis_spec::GnosisChainSpec};
+use crate::{
+    pool_locals_propagate::LocalsOnlyPropagateValidator,
+    primitives::GnosisNodePrimitives,
+    spec::gnosis_spec::GnosisChainSpec,
+};
 
 /// Slots per epoch on Gnosis Chain
 const EPOCH_SLOTS: u64 = 16;
@@ -33,7 +38,15 @@ where
     Node: FullNodeTypes<Types = Types>,
     Evm: ConfigureEvm<Primitives = PrimitivesTy<Types>> + Clone + 'static,
 {
-    type Pool = EthTransactionPool<Node::Provider, DiskFileBlobStore, Evm>;
+    type Pool = reth_transaction_pool::Pool<
+        TransactionValidationTaskExecutor<
+            LocalsOnlyPropagateValidator<
+                EthTransactionValidator<Node::Provider, EthPooledTransaction, Evm>,
+            >,
+        >,
+        CoinbaseTipOrdering<EthPooledTransaction>,
+        DiskFileBlobStore,
+    >;
 
     async fn build_pool(
         self,
@@ -66,28 +79,34 @@ where
         let blob_store =
             reth_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
 
-        let validator =
+        let local_transactions_config = pool_config.local_transactions_config.clone();
+
+        let validator_inner =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .set_eip4844(!blobs_disabled)
                 .kzg_settings(ctx.kzg_settings()?)
                 .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .with_local_transactions_config(local_transactions_config.clone())
                 .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
                 .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
                 .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
                 .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
                 .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
-        if validator.validator().eip4844() {
+        if validator_inner.validator().eip4844() {
             // initializing the KZG settings can be expensive, this should be done upfront so that
             // it doesn't impact the first block or the first gossiped blob transaction, so we
             // initialize this in the background
-            let kzg_settings = validator.validator().kzg_settings().clone();
+            let kzg_settings = validator_inner.validator().kzg_settings().clone();
             ctx.task_executor().spawn_blocking_task(async move {
                 let _ = kzg_settings.get();
                 debug!(target: "reth::cli", "Initialized KZG settings");
             });
         }
+
+        let validator = validator_inner.map(move |inner| {
+            LocalsOnlyPropagateValidator::new(inner, local_transactions_config.clone())
+        });
 
         let transaction_pool = TxPoolBuilder::new(ctx)
             .with_validator(validator)
