@@ -3,6 +3,7 @@
 //! 流程：CREATE arb 合约 -> 执行 startFlashLoan -> 计算利润
 
 use alloy_primitives::{Address, Bytes, U256};
+use alloy_eips::eip2930::AccessList;
 use gnosis_primitives::header::GnosisHeader;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
@@ -387,6 +388,9 @@ pub struct ArbitrageSimRequest {
     pub funder_address: Option<Address>,
     #[serde(default)]
     pub debug: bool,
+    /// EIP-2930 access list for the main flash/execute call (eth_createAccessList from goodboy submit path).
+    #[serde(default)]
+    pub access_list: Option<AccessList>,
 }
 
 #[inline]
@@ -412,6 +416,10 @@ fn use_aave_flash_selector(request: &ArbitrageSimRequest) -> bool {
         .flash_loan_type
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("aave"))
+}
+
+fn sim_call_access_list(request: &ArbitrageSimRequest) -> AccessList {
+    request.access_list.clone().unwrap_or_default()
 }
 
 /// 分步 trace 信息
@@ -839,7 +847,7 @@ where
                 nonce: 1,
                 gas_price: basefee.into(),
                 gas_priority_fee: Some(0),
-                access_list: Default::default(),
+                access_list: sim_call_access_list(&request),
                 blob_hashes: Vec::new(),
                 max_fee_per_blob_gas: 0,
                 tx_type: 2,
@@ -907,7 +915,7 @@ where
                 nonce: execute_path_nonce,
                 gas_price: basefee.into(),
                 gas_priority_fee: Some(0),
-                access_list: Default::default(),
+                access_list: sim_call_access_list(&request),
                 blob_hashes: Vec::new(),
                 max_fee_per_blob_gas: 0,
                 tx_type: 2,
