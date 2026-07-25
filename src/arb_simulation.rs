@@ -20,7 +20,7 @@ use revm::DatabaseCommit;
 use revm_primitives::TxKind;
 use revm_primitives::hardfork::SpecId;
 use revm::context_interface::block::BlobExcessGasAndPrice;
-use revm_state::AccountInfo;
+use revm_state::{AccountInfo, Bytecode};
 use std::sync::Arc;
 
 use tracing;
@@ -33,6 +33,13 @@ const TX_GAS_LIMIT: u64 = 30_000_000;
 
 /// 模拟用 deployer `0x…02` 在 Gnosis 上链上余额极小，但 CREATE + 后续调用需支付 gas；在 CacheDB 中补足，避免 “lack of funds for max fee”。
 const ARB_SIM_DEPLOYER_MIN_NATIVE_WEI: u128 = 1_000u128 * 10u128.pow(18);
+
+/// EIP-7702 delegation designator: 0xef0100 || implementation (23 bytes).
+fn eip7702_delegation_code(delegate: Address) -> Bytecode {
+    let mut v = vec![0xef, 0x01, 0x00];
+    v.extend_from_slice(delegate.as_slice());
+    Bytecode::new_raw(Bytes::from(v))
+}
 
 /// CREATE 地址: keccak256(rlp([sender, nonce]))[12:]
 fn create_address(sender: Address, nonce: u64) -> Address {
@@ -66,10 +73,10 @@ const START_FLASH_LOAN_ENC_SELECTOR: [u8; 4] = [0xb3, 0x5f, 0xbf, 0x40];
 const START_FLASH_LOAN_V3_SELECTOR: [u8; 4] = [0xbb, 0xa5, 0x9c, 0x67];
 /// startFlashLoanV3Enc(address,uint96,uint96,bool,bytes)
 const START_FLASH_LOAN_V3_ENC_SELECTOR: [u8; 4] = [0xcd, 0xa4, 0x37, 0xaf];
-/// startSwapAsFlashV3(address,bool,uint256,bool,bytes) — borrow one side / repay other via pool.swap
-const START_SWAP_AS_FLASH_V3_SELECTOR: [u8; 4] = [0xe5, 0xc2, 0x34, 0xbf];
-/// startSwapAsFlashV3Enc(address,bool,uint256,bool,bytes)
-const START_SWAP_AS_FLASH_V3_ENC_SELECTOR: [u8; 4] = [0x0a, 0x1b, 0x65, 0x2f];
+/// startSwapAsFlashV3(address,bool,uint256,bool,address,bytes) — repayToken avoids token0/token1 SLOAD
+const START_SWAP_AS_FLASH_V3_SELECTOR: [u8; 4] = [0x6d, 0xb4, 0x9b, 0xa8];
+/// startSwapAsFlashV3Enc(address,bool,uint256,bool,address,bytes)
+const START_SWAP_AS_FLASH_V3_ENC_SELECTOR: [u8; 4] = [0x22, 0x47, 0xb7, 0x90];
 /// startFlashLoanV4(address,uint256,bool,bytes) selector — FlashArbV3V4 only
 const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
 /// startFlashLoanV4Enc(address,uint256,bool,bytes)
@@ -378,13 +385,16 @@ pub struct ArbitrageSimRequest {
     /// V3SwapAsFlash: pool.swap zeroForOne for exact-out borrow
     #[serde(default)]
     pub zero_for_one: Option<bool>,
+    /// V3SwapAsFlash: repay currency (other side of the flash pool)
+    #[serde(default)]
+    pub repay_token: Option<Address>,
     pub is_first_last_same_eth: bool,
     /// arb 合约 init bytecode，模拟时 CREATE 部署
     pub arb_contract_bytecode: Bytes,
     /// pathData = abi.encode(Hop[])，由调用方编码；`encrypt_path_data=true` 时为 tip 绑定 XOR 密文
     pub path_data: Bytes,
     /// true：走 *Enc 入口并对 pathData 解密。goodboy `encrypt_submit_calldata` 打开时置 true，
-    /// 使 gasUsed 含解密开销（与上链一致）。模拟侧 tipEff=0、caller=0x…02，调用方须按此加密。
+    /// 使 gasUsed 含解密开销（与上链一致）。模拟 tipEff=0；eoa7702 时 caller=eoa，否则 caller=0x…02。
     #[serde(default)]
     pub encrypt_path_data: bool,
     #[serde(default)]
@@ -393,6 +403,12 @@ pub struct ArbitrageSimRequest {
     pub initial_amount: Option<String>,
     #[serde(default)]
     pub funder_address: Option<Address>,
+    /// true：CREATE impl 后将 `eoa` 委托到 impl 并 self-call；复用链上 EOA allowance（与 approve_warmup 对齐）。
+    #[serde(default)]
+    pub eoa7702: bool,
+    /// eoa7702 模式下的 authority / self-call 地址（须与 bytecode constructor owner 一致）。
+    #[serde(default)]
+    pub eoa: Option<Address>,
     #[serde(default)]
     pub debug: bool,
     /// EIP-2930 access list for the main flash/execute call (eth_createAccessList from goodboy submit path).
@@ -618,6 +634,42 @@ where
             }
         }
 
+        // eoa7702: CREATE 地址可预计算 → 先委托真实 EOA，复用链上 allowance，再 CREATE impl。
+        if request.eoa7702 {
+            let eoa = request.eoa.ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "eoa7702=true requires eoa address",
+                    None::<()>,
+                )
+            })?;
+            if eoa == Address::ZERO {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "eoa7702: eoa must be non-zero",
+                    None::<()>,
+                ));
+            }
+            let mut eoa_info = cache_db
+                .basic(eoa.into())
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(-32000, format!("State read error: {e}"), None::<()>)
+                })?
+                .unwrap_or(AccountInfo::default());
+            // Preserve chain nonce / storage (ERC20 allowances from approve_warmup).
+            eoa_info.code = Some(eip7702_delegation_code(arb_address));
+            let floor = U256::from(ARB_SIM_DEPLOYER_MIN_NATIVE_WEI);
+            if eoa_info.balance < floor {
+                eoa_info.balance = floor;
+            }
+            cache_db.insert_account_info(eoa, eoa_info);
+            tracing::info!(
+                impl = %arb_address,
+                authority = %eoa,
+                "step: EIP-7702 delegation prepared (reuse on-chain allowances)"
+            );
+        }
+
         let db = State::builder().with_database(cache_db).build();
 
         let evm_factory = self.evm_config.executor_factory.evm_factory();
@@ -667,6 +719,24 @@ where
         }
 
         evm.db_mut().commit(create_result.state);
+
+        let impl_address = arb_address;
+        // eoa7702: from=to=EOA（复用链上 allowance）；contract: from=0x…02 to=impl
+        let (exec_address, call_caller, call_to, call_nonce) = if request.eoa7702 {
+            let eoa = request.eoa.ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "eoa7702=true requires eoa address", None::<()>)
+            })?;
+            let nonce = evm
+                .db_mut()
+                .basic(eoa.into())
+                .ok()
+                .flatten()
+                .map(|a| a.nonce)
+                .unwrap_or(0);
+            (eoa, eoa, eoa, nonce)
+        } else {
+            (impl_address, arb_deployer, impl_address, 1u64)
+        };
 
         use alloy_sol_types::SolValue;
 
@@ -812,12 +882,27 @@ where
                         None::<()>,
                     ));
                 }
+                let repay_token = request.repay_token.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V3SwapAsFlash requires repayToken",
+                        None::<()>,
+                    )
+                })?;
+                if repay_token == Address::ZERO {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V3SwapAsFlash repayToken must be non-zero",
+                        None::<()>,
+                    ));
+                }
                 let zero_for_one = request.zero_for_one.unwrap_or(false);
                 let params = (
                     pool,
                     zero_for_one,
                     amount_out,
                     request.is_first_last_same_eth,
+                    repay_token,
                     request.path_data.to_vec(),
                 );
                 let sel = if enc {
@@ -884,12 +969,12 @@ where
             let mut calldata = Vec::from(selector);
             calldata.extend_from_slice(&calldata_params);
             let call_tx = TxEnv {
-                caller: arb_deployer,
-                kind: TxKind::Call(arb_address),
+                caller: call_caller,
+                kind: TxKind::Call(call_to),
                 data: Bytes::from(calldata),
                 value: U256::ZERO,
                 gas_limit: sim_tx_gas_limit,
-                nonce: 1,
+                nonce: call_nonce,
                 gas_price: basefee.into(),
                 gas_priority_fee: Some(0),
                 access_list: sim_call_access_list(&request),
@@ -998,14 +1083,15 @@ where
         evm.db_mut().commit(call_result.state);
 
         let profit_wei = if success {
+            // eoa7702: 利润留在 EOA；contract: 留在 impl
             if request.use_flash_loan {
-                compute_profit_wei_flash_loan(&mut evm, arb_address, arb_deployer, &request)
+                compute_profit_wei_flash_loan(&mut evm, exec_address, call_caller, &request)
                     .unwrap_or_else(|_| "0".to_string())
             } else if request.is_first_last_same_eth {
-                compute_profit_wei(&mut evm, arb_address, arb_deployer, &request)
+                compute_profit_wei(&mut evm, exec_address, call_caller, &request)
                     .unwrap_or_else(|_| "0".to_string())
             } else if request.initial_token.is_some() && request.initial_token != Some(Address::ZERO) {
-                compute_profit_wei_erc20(&mut evm, arb_address, arb_deployer, &request)
+                compute_profit_wei_erc20(&mut evm, exec_address, call_caller, &request)
                     .unwrap_or_else(|_| "0".to_string())
             } else {
                 "0".to_string()
