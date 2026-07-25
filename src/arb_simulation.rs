@@ -179,70 +179,70 @@ where
     }
 }
 
-/// 闪电贷路径：回调内已还清本金+fee，利润 = arb 合约上借入 token 的剩余 ERC20 余额。
-/// 优先 `flash_loan_currency`（Aave/Balancer/V4），否则 `initial_token`（goodboy 首跳 tokenIn），
-/// 再否则从 V2 pair / V3 pool 的 amount0/amount1 推断借入侧。
+/// 闪电贷利润 token：V3SwapAsFlash 用 `repay_token`/`initial_token`（还款币），
+/// 其余优先 `flash_loan_currency`，再否则从 V2/V3 借入侧推断。
+fn resolve_flash_profit_token<EV>(
+    evm: &mut EV,
+    caller: Address,
+    request: &ArbitrageSimRequest,
+) -> Option<Address>
+where
+    EV: reth_evm::Evm<DB: revm::Database>,
+{
+    // V3SwapAsFlash：利润在还款币；Go 侧也会把 initialToken 设为 repay。
+    if let Some(repay) = request.repay_token {
+        if repay != Address::ZERO {
+            return Some(repay);
+        }
+    }
+    if let Some(currency) = request.flash_loan_currency {
+        if currency != Address::ZERO {
+            return Some(currency);
+        }
+    }
+    if let Some(t) = request.initial_token {
+        if t != Address::ZERO {
+            return Some(t);
+        }
+    }
+    if let Some(pair) = request.flash_loan_pair {
+        let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
+        let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
+        if amount0 > U256::ZERO {
+            return get_pool_token(evm, pair, caller, TOKEN0_SELECTOR);
+        }
+        if amount1 > U256::ZERO {
+            return get_pool_token(evm, pair, caller, TOKEN1_SELECTOR);
+        }
+    }
+    if let Some(pool) = request.flash_loan_pool {
+        let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
+        let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
+        if amount0 > U256::ZERO {
+            return get_pool_token(evm, pool, caller, TOKEN0_SELECTOR);
+        }
+        if amount1 > U256::ZERO {
+            return get_pool_token(evm, pool, caller, TOKEN1_SELECTOR);
+        }
+    }
+    None
+}
+
+/// 闪电贷路径：回调内已还清本金+fee，利润 = 执行前后借入 token 余额差分。
+/// eoa7702 下 exec 为真实 EOA，必须用差分，否则会把库存余额算进 profitWei。
 fn compute_profit_wei_flash_loan<EV>(
     evm: &mut EV,
     arb_address: Address,
     caller: Address,
     request: &ArbitrageSimRequest,
+    balance_before: U256,
 ) -> Result<String, ()>
 where
     EV: reth_evm::Evm<DB: revm::Database>,
 {
-    let profit_token = if let Some(currency) = request.flash_loan_currency {
-        if currency != Address::ZERO {
-            Some(currency)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-    .or_else(|| {
-        request.initial_token.and_then(|t| {
-            if t != Address::ZERO {
-                Some(t)
-            } else {
-                None
-            }
-        })
-    })
-    .or_else(|| {
-        if let Some(pair) = request.flash_loan_pair {
-            let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
-            let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
-            if amount0 > U256::ZERO {
-                get_pool_token(evm, pair, caller, TOKEN0_SELECTOR)
-            } else if amount1 > U256::ZERO {
-                get_pool_token(evm, pair, caller, TOKEN1_SELECTOR)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    })
-    .or_else(|| {
-        if let Some(pool) = request.flash_loan_pool {
-            let amount0 = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
-            let amount1 = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
-            if amount0 > U256::ZERO {
-                get_pool_token(evm, pool, caller, TOKEN0_SELECTOR)
-            } else if amount1 > U256::ZERO {
-                get_pool_token(evm, pool, caller, TOKEN1_SELECTOR)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
-
-    let profit_token = profit_token.ok_or(())?;
-    let balance = get_erc20_balance(evm, profit_token, arb_address, caller).ok_or(())?;
-    Ok(balance.to_string())
+    let profit_token = resolve_flash_profit_token(evm, caller, request).ok_or(())?;
+    let balance_after = get_erc20_balance(evm, profit_token, arb_address, caller).ok_or(())?;
+    Ok(balance_after.saturating_sub(balance_before).to_string())
 }
 
 /// 计算利润：profit = (arb native balance + arb WETH balance) - initial_amount
@@ -323,12 +323,13 @@ where
     Ok(profit.to_string())
 }
 
-/// 计算 ERC20 起止路径的利润
+/// 计算 ERC20 起止路径的利润 = 执行前后余额差分（transfer 之后、主调用之前快照）。
 fn compute_profit_wei_erc20<EV>(
     evm: &mut EV,
     arb_address: Address,
     caller: Address,
     request: &ArbitrageSimRequest,
+    balance_before: U256,
 ) -> Result<String, ()>
 where
     EV: reth_evm::Evm<DB: revm::Database>,
@@ -337,14 +338,8 @@ where
     if initial_token == Address::ZERO {
         return Err(());
     }
-    let initial: U256 = request
-        .initial_amount
-        .as_ref()
-        .and_then(|s| s.parse::<u128>().ok())
-        .map(U256::from)
-        .unwrap_or(U256::ZERO);
     let final_balance = get_erc20_balance(evm, initial_token, arb_address, caller).ok_or(())?;
-    let profit = final_balance.saturating_sub(initial);
+    let profit = final_balance.saturating_sub(balance_before);
     Ok(profit.to_string())
 }
 
@@ -848,6 +843,23 @@ where
             tracing::info!(balance = %bal, "arb balance before executePath");
         }
 
+        // 主调用前快照利润 token 余额；eoa7702 下 EOA 可能有库存，必须用 after−before。
+        let profit_balance_before = if request.use_flash_loan {
+            resolve_flash_profit_token(&mut evm, call_caller, &request)
+                .and_then(|token| get_erc20_balance(&mut evm, token, exec_address, call_caller))
+                .unwrap_or(U256::ZERO)
+        } else if request.initial_token.is_some() && request.initial_token != Some(Address::ZERO) {
+            get_erc20_balance(
+                &mut evm,
+                request.initial_token.unwrap(),
+                exec_address,
+                call_caller,
+            )
+            .unwrap_or(U256::ZERO)
+        } else {
+            U256::ZERO
+        };
+
         let call_result = if request.use_flash_loan {
             let enc = request.encrypt_path_data;
             let (selector, calldata_params): ([u8; 4], Vec<u8>) = if let Some(pair) = request.flash_loan_pair {
@@ -1083,16 +1095,28 @@ where
         evm.db_mut().commit(call_result.state);
 
         let profit_wei = if success {
-            // eoa7702: 利润留在 EOA；contract: 留在 impl
+            // eoa7702: 利润留在 EOA；contract: 留在 impl。一律用主调用前后余额差分。
             if request.use_flash_loan {
-                compute_profit_wei_flash_loan(&mut evm, exec_address, call_caller, &request)
-                    .unwrap_or_else(|_| "0".to_string())
+                compute_profit_wei_flash_loan(
+                    &mut evm,
+                    exec_address,
+                    call_caller,
+                    &request,
+                    profit_balance_before,
+                )
+                .unwrap_or_else(|_| "0".to_string())
             } else if request.is_first_last_same_eth {
                 compute_profit_wei(&mut evm, exec_address, call_caller, &request)
                     .unwrap_or_else(|_| "0".to_string())
             } else if request.initial_token.is_some() && request.initial_token != Some(Address::ZERO) {
-                compute_profit_wei_erc20(&mut evm, exec_address, call_caller, &request)
-                    .unwrap_or_else(|_| "0".to_string())
+                compute_profit_wei_erc20(
+                    &mut evm,
+                    exec_address,
+                    call_caller,
+                    &request,
+                    profit_balance_before,
+                )
+                .unwrap_or_else(|_| "0".to_string())
             } else {
                 "0".to_string()
             }
