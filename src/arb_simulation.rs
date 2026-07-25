@@ -66,6 +66,10 @@ const START_FLASH_LOAN_ENC_SELECTOR: [u8; 4] = [0xb3, 0x5f, 0xbf, 0x40];
 const START_FLASH_LOAN_V3_SELECTOR: [u8; 4] = [0xbb, 0xa5, 0x9c, 0x67];
 /// startFlashLoanV3Enc(address,uint96,uint96,bool,bytes)
 const START_FLASH_LOAN_V3_ENC_SELECTOR: [u8; 4] = [0xcd, 0xa4, 0x37, 0xaf];
+/// startSwapAsFlashV3(address,bool,uint256,bool,bytes) — borrow one side / repay other via pool.swap
+const START_SWAP_AS_FLASH_V3_SELECTOR: [u8; 4] = [0xe5, 0xc2, 0x34, 0xbf];
+/// startSwapAsFlashV3Enc(address,bool,uint256,bool,bytes)
+const START_SWAP_AS_FLASH_V3_ENC_SELECTOR: [u8; 4] = [0x0a, 0x1b, 0x65, 0x2f];
 /// startFlashLoanV4(address,uint256,bool,bytes) selector — FlashArbV3V4 only
 const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
 /// startFlashLoanV4Enc(address,uint256,bool,bytes)
@@ -371,6 +375,9 @@ pub struct ArbitrageSimRequest {
     pub amount0_out: Option<String>,
     #[serde(default)]
     pub amount1_out: Option<String>,
+    /// V3SwapAsFlash: pool.swap zeroForOne for exact-out borrow
+    #[serde(default)]
+    pub zero_for_one: Option<bool>,
     pub is_first_last_same_eth: bool,
     /// arb 合约 init bytecode，模拟时 CREATE 部署
     pub arb_contract_bytecode: Bytes,
@@ -399,6 +406,14 @@ fn use_balancer_v3_flash_selector(request: &ArbitrageSimRequest) -> bool {
         .flash_loan_type
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("balancerv3"))
+}
+
+#[inline]
+fn use_v3_swap_as_flash_selector(request: &ArbitrageSimRequest) -> bool {
+    matches!(
+        request.flash_loan_type.as_deref(),
+        Some(t) if t.eq_ignore_ascii_case("V3SwapAsFlash")
+    )
 }
 
 #[inline]
@@ -779,6 +794,36 @@ where
                     START_FLASH_LOAN_ENC_SELECTOR
                 } else {
                     START_FLASH_LOAN_SELECTOR
+                };
+                (sel, params.abi_encode_params())
+            } else if use_v3_swap_as_flash_selector(&request) {
+                let pool = request.flash_loan_pool.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V3SwapAsFlash requires flashLoanPool",
+                        None::<()>,
+                    )
+                })?;
+                let amount_out = parse_flash_loan_amount_wei(request.flash_loan_amount.as_ref());
+                if amount_out.is_zero() {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V3SwapAsFlash requires flashLoanAmount",
+                        None::<()>,
+                    ));
+                }
+                let zero_for_one = request.zero_for_one.unwrap_or(false);
+                let params = (
+                    pool,
+                    zero_for_one,
+                    amount_out,
+                    request.is_first_last_same_eth,
+                    request.path_data.to_vec(),
+                );
+                let sel = if enc {
+                    START_SWAP_AS_FLASH_V3_ENC_SELECTOR
+                } else {
+                    START_SWAP_AS_FLASH_V3_SELECTOR
                 };
                 (sel, params.abi_encode_params())
             } else if let Some(pool) = request.flash_loan_pool {
