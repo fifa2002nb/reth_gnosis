@@ -14,9 +14,10 @@ use alloy_primitives::keccak256;
 use reth_revm::{database::StateProviderDatabase, db::State};
 use revm::database::CacheDB;
 use revm::Database;
-use revm::context::TxEnv;
+use revm::context::{BlockEnv, TxEnv};
 use revm::context::result::ExecutionResult;
 use revm::DatabaseCommit;
+use revm::context_interface::Block;
 use revm_primitives::TxKind;
 use revm_primitives::hardfork::SpecId;
 use revm::context_interface::block::BlobExcessGasAndPrice;
@@ -409,6 +410,37 @@ pub struct ArbitrageSimRequest {
     /// EIP-2930 access list for the main flash/execute call (eth_createAccessList from goodboy submit path).
     #[serde(default)]
     pub access_list: Option<AccessList>,
+    /// Seconds added to the checked-out header timestamp while keeping state at `block_number`.
+    /// Use to model next-block inclusion (e.g. Gnosis ~5s) for time-dependent gas (Algebra fee plugin, Curve).
+    #[serde(default)]
+    pub timestamp_offset_sec: Option<u64>,
+    /// Absolute block.timestamp override (seconds). Wins over `timestamp_offset_sec` when set.
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    /// Optional addition to `block.number` (state still from `block_number`). Default 0.
+    #[serde(default)]
+    pub block_number_offset: Option<u64>,
+}
+
+/// Advance block env clock without changing the checked-out state root.
+fn apply_block_env_time_overrides(block_env: &mut BlockEnv, request: &ArbitrageSimRequest) {
+    let base_ts: u64 = block_env.timestamp().saturating_to();
+    let new_ts = if let Some(abs) = request.timestamp {
+        abs
+    } else if let Some(off) = request.timestamp_offset_sec {
+        base_ts.saturating_add(off)
+    } else {
+        base_ts
+    };
+    if new_ts != base_ts {
+        block_env.timestamp = U256::from(new_ts);
+    }
+    if let Some(off) = request.block_number_offset {
+        if off > 0 {
+            let base_n: u64 = block_env.number().saturating_to();
+            block_env.number = U256::from(base_n.saturating_add(off));
+        }
+    }
 }
 
 #[inline]
@@ -553,6 +585,9 @@ where
             .evm_config
             .evm_env(header)
             .map_err(|e| ErrorObjectOwned::owned(-32000, format!("EVM env error: {}", e), None::<()>))?;
+
+        // Keep state at `block_number`, but optionally advance block env so gas matches next-block inclusion.
+        apply_block_env_time_overrides(&mut evm_env.block_env, &request);
 
         // `goodboy/foundry/bsc-arbi-sim/foundry.toml` 使用 evm_version = "cancun"。历史块若在链上
         // Shanghai 激活之前，revm_spec 会偏旧，CREATE 会因 PUSH0/MCOPY 等报 NotActivated；Forge fork
