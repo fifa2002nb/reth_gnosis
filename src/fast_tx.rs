@@ -208,7 +208,7 @@ async fn try_fast_broadcast(tx: TransactionSigned, hash: B256) -> bool {
         }
         network.send_transactions(peer_id, vec![Arc::clone(&shared)]);
     }
-    tracing::debug!(target: "fast_tx", peer_count, "fast broadcast full tx to all active peers");
+    tracing::info!(target: "fast_tx", peer_count, "fast broadcast full tx to all active peers");
     true
 }
 
