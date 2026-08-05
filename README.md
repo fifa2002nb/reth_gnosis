@@ -18,6 +18,30 @@ Refer to the Reth's documentation to run a node: https://reth.rs/
 Reth differs from other clients, you need to import a post-merge state since we don't support the pre-merge yet. All file downloads are handled internally in the setup script.
 You can run the node using two methods: Docker or building from source.
 
+## Patched reth fork
+
+Every `reth-*` dep in `Cargo.toml` is pinned to a commit on
+[`fifa2002nb/reth`](https://github.com/fifa2002nb/reth) (branch
+`v2.2.0-arb-fast-tx-rtt`, currently rev `a0e82086…`). This fork sits on top of
+upstream `v2.2.0` with one added commit that exposes
+`TransactionsHandle::subscribe_incoming()` — required by
+`arb_sendRawTransactionFast` peer-echo RTT observability, see
+[docs/fast-tx-rtt.md](docs/fast-tx-rtt.md).
+
+Nothing to set up locally — `cargo build` will fetch the fork automatically.
+The fork repo must be **public** (or the builder must be authenticated to a
+private fork), otherwise cargo aborts with `failed to authenticate`.
+
+### Upgrading reth
+
+To bump the pinned reth version:
+
+1. Rebase the fork's `v2.2.0-arb-fast-tx-rtt` branch onto the new upstream
+   tag; resolve any conflict in `crates/net/network/src/transactions/mod.rs`.
+2. Push the new HEAD to `fifa2002nb/reth`.
+3. Update the `rev = "…"` hash on every `reth-*` line in `Cargo.toml`
+   (single find-and-replace).
+
 ## Option 1: Using Docker
 
 You can run the node using Docker. You can pull the image from the Docker Hub by running the following command:
