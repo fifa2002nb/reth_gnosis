@@ -25,7 +25,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{keccak256, B256, Bytes};
 use dashmap::DashMap;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
@@ -169,11 +169,34 @@ fn gc_expired() {
     }
 }
 
-/// PeerId (B512) hex 全串 128 字符，做 label 会给 prometheus cardinality/存储带来压力。
-/// 取前 12 字符（enode 前缀足以唯一区分连接中的 peer）。
+/// 用 `keccak256(公钥)` 而不是公钥原文，跟 `admin_peers` RPC / devp2p discv4 的
+/// "Node ID" 约定保持一致（`crates/rpc/rpc/src/admin.rs` 里 `admin_peers` 的
+/// `id` 字段就是这么算的）——否则这里的 peer label 和 `admin_peers`/
+/// `prune_slow_peers.sh` 看到的 id 永远对不上（同一个 peer，两套不同算法，
+/// 各自确定性但互相不等价，曾经在排查 RTT 数据时把人绕晕过）。
+/// 全串 64 字节 = 128 hex 字符，做 label 会给 prometheus cardinality/存储带来压力，
+/// 取前 12 字符（在同一节点的活跃 peer 集合内足以唯一）。
 fn format_peer(peer_id: &PeerId) -> String {
-    let s = format!("{peer_id:x}");
-    if s.len() > 12 { s[..12].to_string() } else { s }
+    let hash = keccak256(peer_id.as_slice());
+    format!("{hash:x}")[..12].to_string()
+}
+
+#[cfg(test)]
+mod format_peer_tests {
+    use super::*;
+
+    /// 真实 admin_peers 返回的 (pubkey, id) 对：`enode://<pubkey>@...` 里的公钥，
+    /// 跟同一条记录 `id` 字段（`keccak256(pubkey)`）——采自本仓当前部署节点。
+    /// 锁住 `format_peer` 跟 `admin_peers`/`prune_slow_peers.sh` 的 id 前 12 位一致，
+    /// 防止再退回成直接对公钥原文取十六进制的旧算法（两边就又对不上了）。
+    #[test]
+    fn matches_admin_peers_keccak_node_id() {
+        let pubkey: PeerId =
+            "8fa77b9051d0e3f0a65ac0627285f0ae628199d09bfb78c0dd006752551dd9ca68423faec0a89bda4c8f3e160ef49746533deb4b031d040eeb5d880e514d3be1"
+                .parse()
+                .unwrap();
+        assert_eq!(format_peer(&pubkey), "93c6ccd7fb53");
+    }
 }
 
 /// 立即向所有 active peer 发送完整签名交易（不验证、不入池、不走 hash announce）。
