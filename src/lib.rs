@@ -36,8 +36,9 @@ use crate::{
     fork_simulation::{ForkSimulationApiServer, ForkSimulationImpl},
     block_end_log_pubsub::{BlockEndLogPubSub, BlockEndLogPubSubApiServer},
     mempool_arb::{
-        spawn_monitor, MempoolArbApiServer, MempoolArbHub, MempoolArbPubSub,
-        MempoolArbPubSubApiServer, MempoolArbRpc,
+        spawn_monitor, GasPressurePubSub, GasPressurePubSubApiServer, GasPressureTracker,
+        MempoolArbApiServer, MempoolArbHub, MempoolArbPubSub, MempoolArbPubSubApiServer,
+        MempoolArbRpc,
     },
     payload::GnosisBuiltPayload,
     primitives::{
@@ -94,14 +95,17 @@ where
     let log_pubsub = BlockEndLogPubSub::new(provider.clone());
 
     let mempool_hub = MempoolArbHub::new();
+    let gas_pressure = GasPressureTracker::new();
     spawn_monitor(
         ctx.node().task_executor(),
         pool.clone(),
         provider.clone(),
         mempool_hub.clone(),
+        gas_pressure.clone(),
     );
     let mempool_pubsub = MempoolArbPubSub::new(mempool_hub.clone());
     let mempool_rpc = MempoolArbRpc::new(mempool_hub);
+    let gas_pressure_pubsub = GasPressurePubSub::new(gas_pressure);
 
     let mut methods = Methods::new();
     methods.merge(log_pubsub.into_rpc())?;
@@ -109,6 +113,7 @@ where
     methods.merge(arb_sim.into_rpc())?;
     methods.merge(mempool_pubsub.into_rpc())?;
     methods.merge(mempool_rpc.into_rpc())?;
+    methods.merge(gas_pressure_pubsub.into_rpc())?;
     methods.merge(FastTxRpc.into_rpc())?;
     ctx.modules.merge_configured(methods)?;
     Ok(())
