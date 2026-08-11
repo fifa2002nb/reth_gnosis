@@ -41,8 +41,25 @@ impl GasPressureTracker {
     }
 
     pub fn set_block_gas_state(&self, gas_limit: u64, head_block: u64) {
+        let prev = self.head_block_number.swap(head_block, Ordering::AcqRel);
+        if prev != 0 && head_block != prev {
+            self.reset_buckets();
+        }
         self.block_gas_limit.store(gas_limit, Ordering::Relaxed);
-        self.head_block_number.store(head_block, Ordering::Relaxed);
+    }
+
+    /// Reset per-block water level: clears all tip buckets and the index map.
+    /// Called on every observed new head block — at block N we only care about
+    /// the gas queued for block N+1, and pool `Mined` events for block N arrive
+    /// asynchronously after the fact. A clean slate per block gives a fresh
+    /// ratio on the next poll tick (and lets the disarm edge fire even when
+    /// long-lived tx backlog dominates the cumulative bucket sums).
+    pub fn reset_buckets(&self) {
+        let mut index = self.index.write().expect("gas pressure index lock");
+        for b in &self.buckets {
+            b.store(0, Ordering::Relaxed);
+        }
+        index.clear();
     }
 
     pub fn block_gas_limit(&self) -> u64 {
@@ -154,5 +171,34 @@ mod tests {
         t.record_add(B256::with_last_byte(1), u64::MAX, 21_000);
         let (sum, _) = t.water_level(u64::MAX);
         assert_eq!(sum, 21_000);
+    }
+
+    #[test]
+    fn new_head_block_clears_buckets() {
+        let t = tracker();
+        t.set_block_gas_state(30_000_000, 100);
+        t.record_add(B256::with_last_byte(1), 5 * BUCKET_WEI, 80_000);
+        let (sum_before, _) = t.water_level(10 * BUCKET_WEI);
+        assert_eq!(sum_before, 80_000);
+        // Same head_block: no reset.
+        t.set_block_gas_state(30_000_000, 100);
+        let (sum_same, _) = t.water_level(10 * BUCKET_WEI);
+        assert_eq!(sum_same, 80_000);
+        // New head_block: water level drops back to 0.
+        t.set_block_gas_state(30_000_000, 101);
+        let (sum_next, limit) = t.water_level(10 * BUCKET_WEI);
+        assert_eq!(sum_next, 0);
+        assert_eq!(limit, 30_000_000);
+    }
+
+    #[test]
+    fn first_head_block_does_not_clear() {
+        let t = tracker();
+        // First call from 0 should not be treated as a "block advance" (avoid wiping
+        // any state already populated by on_added before head_tick fired).
+        t.record_add(B256::with_last_byte(1), BUCKET_WEI, 50_000);
+        t.set_block_gas_state(30_000_000, 42);
+        let (sum, _) = t.water_level(10 * BUCKET_WEI);
+        assert_eq!(sum, 50_000);
     }
 }
