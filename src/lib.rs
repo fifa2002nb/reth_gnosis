@@ -71,8 +71,12 @@ pub fn register_fork_simulation_rpc<Node, EthApi>(
 where
     Node: FullNodeComponents<Evm = GnosisEvmConfig>,
     EthApi: EthApiTypes,
-    <Node as FullNodeComponents>::Pool:
-        TransactionPool<Transaction: PoolTransaction> + Clone + Send + Sync + 'static,
+    <Node as FullNodeComponents>::Pool: TransactionPool<
+            Transaction: PoolTransaction<Consensus = TransactionSigned>,
+        > + Clone
+        + Send
+        + Sync
+        + 'static,
     Node::Provider: BlockNumReader
         + BlockHashReader
         + HeaderProvider<Header = GnosisHeader>
@@ -91,7 +95,7 @@ where
     // calls against the same block reuse resolved state instead of each opening a fresh DB read tx.
     let block_state_cache = BlockStateCache::new();
     let fork_sim = ForkSimulationImpl::new(provider.clone(), evm_config.clone(), block_state_cache.clone());
-    let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config, block_state_cache);
+    let arb_sim = ArbitrageSimulationImpl::new(provider.clone(), evm_config.clone(), block_state_cache);
     let log_pubsub = BlockEndLogPubSub::new(provider.clone());
 
     let mempool_hub = MempoolArbHub::new();
@@ -100,6 +104,7 @@ where
         ctx.node().task_executor(),
         pool.clone(),
         provider.clone(),
+        evm_config.clone(),
         mempool_hub.clone(),
         gas_pressure.clone(),
     );

@@ -23,10 +23,8 @@ fn default_poll_ms() -> u64 {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GasPressureFilter {
-    /// Caller's own max willingness-to-pay tip (wei/gas) — matches goodboy's
-    /// `competitive_tip_max_wei_per_gas`. The water level only counts pending
-    /// gas at or below this tip; bids above it will claim block space
-    /// regardless of what we do, so they sit outside our decision space.
+    /// Kept for wire compatibility. Packing uses the full local pending set in
+    /// tip order (high-tip txs take space first); see GasPressureTracker::water_level.
     #[serde(default, with = "alloy_serde::quantity")]
     pub ceiling_wei_per_gas: u64,
     /// Per-mille (out of 1000) fill ratio at which an `armed:true` event fires.
@@ -59,9 +57,9 @@ pub struct GasPressureEvent {
 }
 
 /// WS: `reth_subscribeBlockGasPressure(filter)` — edge-triggered signal for
-/// "the next block's gas is about to fill up at or below my max tip". Lets a
-/// subscriber (goodboy's RBF defender) skip a fixed time-window wait and
-/// react to real mempool congestion instead.
+/// local next-block fill (revm-packed gasUsed / gasLimit). Lets a subscriber
+/// (goodboy's RBF defender) skip a fixed time-window wait and react to real
+/// mempool congestion instead.
 #[rpc(server, namespace = "reth")]
 pub trait GasPressurePubSubApi {
     #[subscription(name = "subscribeBlockGasPressure", item = GasPressureEvent)]
@@ -115,7 +113,8 @@ async fn poll_and_push(sink: SubscriptionSink, tracker: Arc<GasPressureTracker>,
                     continue;
                 }
                 let head_block = tracker.head_block_number();
-                let ratio_permille = ((gas_sum as u128 * 1000) / gas_limit as u128).min(u32::MAX as u128) as u32;
+                let ratio_permille =
+                    ((gas_sum as u128 * 1000) / gas_limit as u128).min(1000) as u32;
                 let Some(armed_now) = decide_push(
                     &mut armed,
                     &mut last_head,

@@ -1,68 +1,50 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
-use alloy_primitives::B256;
-use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
+use tokio::sync::Notify;
 
-/// Bucket width: 0.1 gwei.
-const BUCKET_WEI: u64 = 100_000_000;
-/// Covers tip ceilings up to 20,000 gwei; ~1.6MB resident (200_000 * 8 bytes).
-const MAX_BUCKETS: usize = 200_000;
-
-/// Tracks pending-pool gas per 0.1gwei tip bucket across the **full** mempool
-/// (no blacklist filter — unlike `MempoolArbHub`, which only tracks txs shaped
-/// like arbitrage swaps). Answers: "if I'm only willing to pay up to `ceiling`,
-/// how much of the next block's gas is already claimed by txs bidding at or
-/// below that tip?" — used to detect the next block filling up before our
-/// own `rbf_start_at_window_ms` t0 would otherwise fire.
+/// Local next-block fill from a revm pack of `pool.best_transactions()`.
 ///
-/// Known approximation (shared with `MempoolArbHub`): `effective_tip_per_gas`
-/// is computed against `base_fee` at insert time and not recomputed as
-/// `base_fee` drifts block to block. Acceptable given Gnosis's bounded
-/// (±12.5%/block) base fee movement and that most pool entries get replaced
-/// or mined within a few blocks anyway.
+/// `packed_gas` is cumulative **gasUsed** after executing txs in tip order against
+/// head state (same packing rule as the payload builder: `cum + gas_limit` must
+/// fit, then add actual `gasUsed`). Capped at one block (`<= gas_limit`).
+///
+/// The 200ms WS poll only reads this cache. A dedicated pack task reruns revm
+/// when [`Self::mark_dirty`] is set (pending add/replace/mined/discard, or new head).
 #[derive(Debug)]
 pub struct GasPressureTracker {
-    buckets: Vec<AtomicU64>,
-    index: RwLock<HashMap<B256, (usize, u64)>>,
+    packed_gas: AtomicU64,
     block_gas_limit: AtomicU64,
     head_block_number: AtomicU64,
+    dirty: AtomicBool,
+    notify: Notify,
 }
 
 impl GasPressureTracker {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            buckets: (0..MAX_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
-            index: RwLock::new(HashMap::new()),
+            packed_gas: AtomicU64::new(0),
             block_gas_limit: AtomicU64::new(0),
             head_block_number: AtomicU64::new(0),
+            dirty: AtomicBool::new(true),
+            notify: Notify::new(),
         })
     }
 
     pub fn set_block_gas_state(&self, gas_limit: u64, head_block: u64) {
-        // Reset buckets *before* publishing the new head so a concurrent
-        // water_level() poll cannot observe (new_head, old_sum).
         let prev = self.head_block_number.load(Ordering::Acquire);
-        if prev != 0 && head_block != prev {
-            self.reset_buckets();
-        }
         self.head_block_number.store(head_block, Ordering::Release);
         self.block_gas_limit.store(gas_limit, Ordering::Relaxed);
-    }
-
-    /// Reset per-block water level: clears all tip buckets and the index map.
-    /// Called on every observed new head block — at block N we only care about
-    /// the gas queued for block N+1, and pool `Mined` events for block N arrive
-    /// asynchronously after the fact. A clean slate per block gives a fresh
-    /// ratio on the next poll tick (and lets the disarm edge fire even when
-    /// long-lived tx backlog dominates the cumulative bucket sums).
-    pub fn reset_buckets(&self) {
-        let mut index = self.index.write().expect("gas pressure index lock");
-        for b in &self.buckets {
-            b.store(0, Ordering::Relaxed);
+        if prev == 0 {
+            self.mark_dirty();
+            return;
         }
-        index.clear();
+        if head_block != prev {
+            // New head: drop the previous window's fill so subscribers can disarm
+            // before the next pack completes.
+            self.packed_gas.store(0, Ordering::Relaxed);
+            self.mark_dirty();
+        }
     }
 
     pub fn block_gas_limit(&self) -> u64 {
@@ -70,56 +52,39 @@ impl GasPressureTracker {
     }
 
     pub fn head_block_number(&self) -> u64 {
-        self.head_block_number.load(Ordering::Relaxed)
+        self.head_block_number.load(Ordering::Acquire)
     }
 
-    /// Full-mempool ingest: intentionally skips `filter::should_track` — a plain
-    /// transfer eats real block gas same as an arb swap does, and excluding it
-    /// would understate how full the next block actually is.
-    pub fn on_added<T: PoolTransaction>(&self, vtx: &ValidPoolTransaction<T>, base_fee: u64) {
-        let tip = vtx.effective_tip_per_gas(base_fee).unwrap_or(0);
-        let tip = u64::try_from(tip).unwrap_or(u64::MAX);
-        self.record_add(*vtx.hash(), tip, vtx.gas_limit());
+    /// Pending set changed: coalesce into the next pack run.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
     }
 
-    pub fn on_removed(&self, hash: B256) {
-        self.record_remove(hash);
+    pub fn notify(&self) -> &Notify {
+        &self.notify
     }
 
-    fn record_add(&self, hash: B256, tip_wei: u64, gas: u64) {
-        let bucket_idx = Self::bucket_index(tip_wei);
-        let mut index = self.index.write().expect("gas pressure index lock");
-        // Same hash re-added (e.g. duplicate "added" notification): reverse the
-        // old bucket contribution first so it's never double-counted.
-        if let Some((old_idx, old_gas)) = index.remove(&hash) {
-            self.buckets[old_idx].fetch_sub(old_gas, Ordering::Relaxed);
-        }
-        self.buckets[bucket_idx].fetch_add(gas, Ordering::Relaxed);
-        index.insert(hash, (bucket_idx, gas));
+    /// Swap dirty to false. Returns whether a pack is needed.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
     }
 
-    fn record_remove(&self, hash: B256) {
-        let mut index = self.index.write().expect("gas pressure index lock");
-        if let Some((idx, gas)) = index.remove(&hash) {
-            self.buckets[idx].fetch_sub(gas, Ordering::Relaxed);
-        }
+    pub fn store_pack(&self, gas_used: u64, gas_limit: u64, head_block: u64) {
+        self.packed_gas.store(gas_used.min(gas_limit), Ordering::Relaxed);
+        self.block_gas_limit.store(gas_limit, Ordering::Relaxed);
+        self.head_block_number.store(head_block, Ordering::Release);
     }
 
-    fn bucket_index(tip_wei: u64) -> usize {
-        ((tip_wei / BUCKET_WEI) as usize).min(MAX_BUCKETS - 1)
-    }
-
-    /// Returns `(gas summed over buckets [0, ceiling_wei], current block gas limit)`.
-    /// Takes the index read lock so a concurrent `reset_buckets` cannot be
-    /// observed mid-zero (partial leftover sum attributed to the new head).
-    pub fn water_level(&self, ceiling_wei: u64) -> (u64, u64) {
-        let _index = self.index.read().expect("gas pressure index lock");
-        let ceiling_idx = Self::bucket_index(ceiling_wei);
-        let gas_sum: u64 = self.buckets[..=ceiling_idx]
-            .iter()
-            .map(|b| b.load(Ordering::Relaxed))
-            .sum();
-        (gas_sum, self.block_gas_limit())
+    /// Returns `(packed gasUsed, current block gas limit)`.
+    ///
+    /// `ceiling_wei` is kept for the WS filter signature. Packing includes the
+    /// full local pending set in tip order (high-tip txs take space first); a
+    /// 10k gwei ceiling already covers essentially every tx on Gnosis.
+    pub fn water_level(&self, _ceiling_wei: u64) -> (u64, u64) {
+        let limit = self.block_gas_limit.load(Ordering::Relaxed);
+        let packed = self.packed_gas.load(Ordering::Relaxed);
+        (packed.min(limit), limit)
     }
 }
 
@@ -132,79 +97,48 @@ mod tests {
     }
 
     #[test]
-    fn add_accumulates_into_bucket() {
+    fn new_head_zeros_packed_gas() {
         let t = tracker();
-        t.record_add(B256::with_last_byte(1), 5 * BUCKET_WEI, 100_000);
-        t.record_add(B256::with_last_byte(2), 5 * BUCKET_WEI + 1, 50_000);
-        t.set_block_gas_state(30_000_000, 1);
-        let (sum, limit) = t.water_level(6 * BUCKET_WEI);
-        assert_eq!(sum, 150_000);
-        assert_eq!(limit, 30_000_000);
-    }
-
-    #[test]
-    fn remove_reverses_bucket() {
-        let t = tracker();
-        let h = B256::with_last_byte(1);
-        t.record_add(h, 2 * BUCKET_WEI, 21_000);
-        t.record_remove(h);
-        let (sum, _) = t.water_level(10 * BUCKET_WEI);
-        assert_eq!(sum, 0);
-    }
-
-    #[test]
-    fn readd_same_hash_overwrites_not_double_counts() {
-        let t = tracker();
-        let h = B256::with_last_byte(9);
-        t.record_add(h, BUCKET_WEI, 21_000);
-        t.record_add(h, BUCKET_WEI, 42_000); // e.g. duplicate "added" notification
-        let (sum, _) = t.water_level(10 * BUCKET_WEI);
-        assert_eq!(sum, 42_000);
-    }
-
-    #[test]
-    fn ceiling_excludes_higher_buckets() {
-        let t = tracker();
-        t.record_add(B256::with_last_byte(1), BUCKET_WEI, 21_000);
-        t.record_add(B256::with_last_byte(2), 50 * BUCKET_WEI, 21_000);
-        let (sum, _) = t.water_level(2 * BUCKET_WEI);
-        assert_eq!(sum, 21_000);
-    }
-
-    #[test]
-    fn tip_beyond_max_clamps_into_last_bucket() {
-        let t = tracker();
-        t.record_add(B256::with_last_byte(1), u64::MAX, 21_000);
-        let (sum, _) = t.water_level(u64::MAX);
-        assert_eq!(sum, 21_000);
-    }
-
-    #[test]
-    fn new_head_block_clears_buckets() {
-        let t = tracker();
-        t.set_block_gas_state(30_000_000, 100);
-        t.record_add(B256::with_last_byte(1), 5 * BUCKET_WEI, 80_000);
-        let (sum_before, _) = t.water_level(10 * BUCKET_WEI);
-        assert_eq!(sum_before, 80_000);
-        // Same head_block: no reset.
-        t.set_block_gas_state(30_000_000, 100);
-        let (sum_same, _) = t.water_level(10 * BUCKET_WEI);
-        assert_eq!(sum_same, 80_000);
-        // New head_block: water level drops back to 0.
-        t.set_block_gas_state(30_000_000, 101);
-        let (sum_next, limit) = t.water_level(10 * BUCKET_WEI);
+        t.set_block_gas_state(17_000_000, 100);
+        t.store_pack(8_000_000, 17_000_000, 100);
+        let (sum, _) = t.water_level(0);
+        assert_eq!(sum, 8_000_000);
+        t.set_block_gas_state(17_000_000, 101);
+        let (sum_next, limit) = t.water_level(0);
         assert_eq!(sum_next, 0);
-        assert_eq!(limit, 30_000_000);
+        assert_eq!(limit, 17_000_000);
+        assert!(t.take_dirty());
     }
 
     #[test]
-    fn first_head_block_does_not_clear() {
+    fn same_head_does_not_dirty_or_zero() {
         let t = tracker();
-        // First call from 0 should not be treated as a "block advance" (avoid wiping
-        // any state already populated by on_added before head_tick fired).
-        t.record_add(B256::with_last_byte(1), BUCKET_WEI, 50_000);
-        t.set_block_gas_state(30_000_000, 42);
-        let (sum, _) = t.water_level(10 * BUCKET_WEI);
-        assert_eq!(sum, 50_000);
+        t.set_block_gas_state(17_000_000, 100);
+        assert!(t.take_dirty());
+        t.store_pack(1_000_000, 17_000_000, 100);
+        t.set_block_gas_state(17_000_000, 100);
+        let (sum, _) = t.water_level(0);
+        assert_eq!(sum, 1_000_000);
+        assert!(!t.take_dirty());
+    }
+
+    #[test]
+    fn store_pack_caps_at_gas_limit() {
+        let t = tracker();
+        t.store_pack(30_000_000, 17_000_000, 1);
+        let (sum, limit) = t.water_level(0);
+        assert_eq!(sum, 17_000_000);
+        assert_eq!(limit, 17_000_000);
+        assert_eq!(t.block_gas_limit(), 17_000_000);
+    }
+
+    #[test]
+    fn take_dirty_clears() {
+        let t = tracker();
+        assert!(t.take_dirty()); // new() starts dirty
+        assert!(!t.take_dirty());
+        t.mark_dirty();
+        assert!(t.take_dirty());
+        assert!(!t.take_dirty());
     }
 }

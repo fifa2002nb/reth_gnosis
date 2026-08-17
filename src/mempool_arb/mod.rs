@@ -1,6 +1,7 @@
 mod config;
 mod filter;
 mod gas_pressure;
+mod gas_pressure_pack;
 mod gas_pressure_pubsub;
 mod hub;
 mod monitor;
