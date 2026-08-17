@@ -105,6 +105,7 @@ async fn poll_and_push(sink: SubscriptionSink, tracker: Arc<GasPressureTracker>,
     let poll_ms = filter.poll_ms.max(20);
     let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
     let mut armed = false;
+    let mut last_head = 0u64;
     loop {
         tokio::select! {
             _ = sink.closed() => return,
@@ -113,15 +114,17 @@ async fn poll_and_push(sink: SubscriptionSink, tracker: Arc<GasPressureTracker>,
                 if gas_limit == 0 {
                     continue;
                 }
+                let head_block = tracker.head_block_number();
                 let ratio_permille = ((gas_sum as u128 * 1000) / gas_limit as u128).min(u32::MAX as u128) as u32;
-                let armed_now = if !armed && ratio_permille >= filter.arm_threshold_permille {
-                    armed = true;
-                    true
-                } else if armed && ratio_permille <= filter.disarm_threshold_permille {
-                    armed = false;
-                    false
-                } else {
-                    continue; // no edge crossed since last tick
+                let Some(armed_now) = decide_push(
+                    &mut armed,
+                    &mut last_head,
+                    head_block,
+                    ratio_permille,
+                    filter.arm_threshold_permille,
+                    filter.disarm_threshold_permille,
+                ) else {
+                    continue;
                 };
 
                 let event = GasPressureEvent {
@@ -129,7 +132,7 @@ async fn poll_and_push(sink: SubscriptionSink, tracker: Arc<GasPressureTracker>,
                     ratio_permille,
                     gas_sum,
                     gas_limit,
-                    head_block: tracker.head_block_number(),
+                    head_block,
                     at_ms: now_ms(),
                 };
                 let msg = match SubscriptionMessage::new(sink.method_name(), sink.subscription_id(), &event) {
@@ -147,9 +150,77 @@ async fn poll_and_push(sink: SubscriptionSink, tracker: Arc<GasPressureTracker>,
     }
 }
 
+/// Arm/disarm edge, plus a forced snapshot when `head_block` advances so
+/// subscribers drop the previous window's ratio instead of keeping a stale
+/// armed cache across the block boundary.
+fn decide_push(
+    armed: &mut bool,
+    last_head: &mut u64,
+    head_block: u64,
+    ratio_permille: u32,
+    arm_threshold: u32,
+    disarm_threshold: u32,
+) -> Option<bool> {
+    let head_changed = *last_head != 0 && head_block != *last_head;
+    if head_changed {
+        *armed = false;
+    }
+    *last_head = head_block;
+
+    if !*armed && ratio_permille >= arm_threshold {
+        *armed = true;
+        Some(true)
+    } else if *armed && ratio_permille <= disarm_threshold {
+        *armed = false;
+        Some(false)
+    } else if head_changed {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decide_push;
+
+    #[test]
+    fn new_head_forces_disarm_snapshot() {
+        let mut armed = true;
+        let mut last_head = 100;
+        // Previous window was armed; new head with empty buckets must push armed=false
+        // so the subscriber drops the stale high ratio.
+        assert_eq!(decide_push(&mut armed, &mut last_head, 101, 0, 940, 840), Some(false));
+        assert!(!armed);
+        assert_eq!(last_head, 101);
+        // Same head, still empty: no more events.
+        assert_eq!(decide_push(&mut armed, &mut last_head, 101, 0, 940, 840), None);
+    }
+
+    #[test]
+    fn same_head_only_emits_on_edges() {
+        let mut armed = false;
+        let mut last_head = 50;
+        assert_eq!(decide_push(&mut armed, &mut last_head, 50, 900, 940, 840), None);
+        assert_eq!(decide_push(&mut armed, &mut last_head, 50, 950, 940, 840), Some(true));
+        assert!(armed);
+        assert_eq!(decide_push(&mut armed, &mut last_head, 50, 900, 940, 840), None);
+        assert_eq!(decide_push(&mut armed, &mut last_head, 50, 800, 940, 840), Some(false));
+        assert!(!armed);
+    }
+
+    #[test]
+    fn first_head_does_not_force_snapshot() {
+        let mut armed = false;
+        let mut last_head = 0;
+        assert_eq!(decide_push(&mut armed, &mut last_head, 42, 100, 940, 840), None);
+        assert_eq!(last_head, 42);
+    }
 }

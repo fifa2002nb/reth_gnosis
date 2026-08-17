@@ -41,10 +41,13 @@ impl GasPressureTracker {
     }
 
     pub fn set_block_gas_state(&self, gas_limit: u64, head_block: u64) {
-        let prev = self.head_block_number.swap(head_block, Ordering::AcqRel);
+        // Reset buckets *before* publishing the new head so a concurrent
+        // water_level() poll cannot observe (new_head, old_sum).
+        let prev = self.head_block_number.load(Ordering::Acquire);
         if prev != 0 && head_block != prev {
             self.reset_buckets();
         }
+        self.head_block_number.store(head_block, Ordering::Release);
         self.block_gas_limit.store(gas_limit, Ordering::Relaxed);
     }
 
@@ -107,7 +110,10 @@ impl GasPressureTracker {
     }
 
     /// Returns `(gas summed over buckets [0, ceiling_wei], current block gas limit)`.
+    /// Takes the index read lock so a concurrent `reset_buckets` cannot be
+    /// observed mid-zero (partial leftover sum attributed to the new head).
     pub fn water_level(&self, ceiling_wei: u64) -> (u64, u64) {
+        let _index = self.index.read().expect("gas pressure index lock");
         let ceiling_idx = Self::bucket_index(ceiling_wei);
         let gas_sum: u64 = self.buckets[..=ceiling_idx]
             .iter()

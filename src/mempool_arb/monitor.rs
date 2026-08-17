@@ -3,16 +3,19 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use gnosis_primitives::header::GnosisHeader;
+use reth_chain_state::CanonStateSubscriptions;
 use reth_provider::{BlockNumReader, HeaderProvider};
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     FullTransactionEvent, NewSubpoolTransactionStream, PoolTransaction, SubPool,
     TransactionListenerKind, TransactionPool,
 };
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
 use super::gas_pressure::GasPressureTracker;
 use super::hub::MempoolArbHub;
+use crate::primitives::GnosisNodePrimitives;
 
 /// Background task: watch txpool pending txs and push tip changelog events.
 pub fn spawn_monitor<Pool, Provider>(
@@ -24,7 +27,13 @@ pub fn spawn_monitor<Pool, Provider>(
 ) where
     Pool: TransactionPool + Clone + Send + Sync + 'static,
     Pool::Transaction: PoolTransaction + 'static,
-    Provider: HeaderProvider<Header = GnosisHeader> + BlockNumReader + Clone + Send + Sync + 'static,
+    Provider: HeaderProvider<Header = GnosisHeader>
+        + BlockNumReader
+        + CanonStateSubscriptions<Primitives = GnosisNodePrimitives>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     executor.spawn_task(async move {
         monitor_loop(pool, provider, hub, gas_pressure).await;
@@ -39,7 +48,13 @@ async fn monitor_loop<Pool, Provider>(
 ) where
     Pool: TransactionPool + Clone + Send + Sync + 'static,
     Pool::Transaction: PoolTransaction + 'static,
-    Provider: HeaderProvider<Header = GnosisHeader> + BlockNumReader + Clone + Send + Sync + 'static,
+    Provider: HeaderProvider<Header = GnosisHeader>
+        + BlockNumReader
+        + CanonStateSubscriptions<Primitives = GnosisNodePrimitives>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let mut pending_stream = NewSubpoolTransactionStream::new(
         pool.new_transactions_listener_for(TransactionListenerKind::All),
@@ -50,7 +65,10 @@ async fn monitor_loop<Pool, Provider>(
         fetch_head_state(&provider).unwrap_or((0, 0, 0));
     hub.set_head_block_number(head_block);
     gas_pressure.set_block_gas_state(gas_limit, head_block);
+    // Fallback if a canon notification is lagged/dropped. Primary reset is the
+    // canon-state stream below — same moment as reth_subscribeBlockEndLogs.
     let mut head_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut canon = BroadcastStream::new(provider.subscribe_to_canonical_state());
 
     debug!(
         target: "rpc::reth",
@@ -61,6 +79,21 @@ async fn monitor_loop<Pool, Provider>(
 
     loop {
         tokio::select! {
+            Some(notification) = canon.next() => {
+                if notification.is_err() {
+                    continue;
+                }
+                if let Some((bf, gl, bn)) = fetch_head_state(&provider) {
+                    if bn == head_block {
+                        continue;
+                    }
+                    base_fee = bf;
+                    gas_limit = gl;
+                    head_block = bn;
+                    hub.set_head_block_number(head_block);
+                    gas_pressure.set_block_gas_state(gas_limit, head_block);
+                }
+            }
             _ = head_tick.tick() => {
                 if let Some((bf, gl, bn)) = fetch_head_state(&provider) {
                     base_fee = bf;
