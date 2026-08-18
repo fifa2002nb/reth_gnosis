@@ -78,6 +78,10 @@ const START_FLASH_LOAN_V3_ENC_SELECTOR: [u8; 4] = [0xcd, 0xa4, 0x37, 0xaf];
 const START_SWAP_AS_FLASH_V3_SELECTOR: [u8; 4] = [0x6d, 0xb4, 0x9b, 0xa8];
 /// startSwapAsFlashV3Enc(address,bool,uint256,bool,address,bytes)
 const START_SWAP_AS_FLASH_V3_ENC_SELECTOR: [u8; 4] = [0x22, 0x47, 0xb7, 0x90];
+/// startSwapAsFlashV2(address,uint96,uint96,bool,address,bytes)
+const START_SWAP_AS_FLASH_V2_SELECTOR: [u8; 4] = [0x37, 0x5a, 0xdf, 0x14];
+/// startSwapAsFlashV2Enc(address,uint96,uint96,bool,address,bytes)
+const START_SWAP_AS_FLASH_V2_ENC_SELECTOR: [u8; 4] = [0x5f, 0x6d, 0xe1, 0xa3];
 /// startFlashLoanV4(address,uint256,bool,bytes) selector — FlashArbV3V4 only
 const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
 /// startFlashLoanV4Enc(address,uint256,bool,bytes)
@@ -456,6 +460,14 @@ fn use_v3_swap_as_flash_selector(request: &ArbitrageSimRequest) -> bool {
     matches!(
         request.flash_loan_type.as_deref(),
         Some(t) if t.eq_ignore_ascii_case("V3SwapAsFlash")
+    )
+}
+
+#[inline]
+fn use_v2_swap_as_flash_selector(request: &ArbitrageSimRequest) -> bool {
+    matches!(
+        request.flash_loan_type.as_deref(),
+        Some(t) if t.eq_ignore_ascii_case("V2SwapAsFlash")
     )
 }
 
@@ -897,7 +909,52 @@ where
 
         let call_result = if request.use_flash_loan {
             let enc = request.encrypt_path_data;
-            let (selector, calldata_params): ([u8; 4], Vec<u8>) = if let Some(pair) = request.flash_loan_pair {
+            let (selector, calldata_params): ([u8; 4], Vec<u8>) = if use_v2_swap_as_flash_selector(&request) {
+                let pair = request.flash_loan_pair.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V2SwapAsFlash requires flashLoanPair",
+                        None::<()>,
+                    )
+                })?;
+                let amount0_out = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
+                let amount1_out = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
+                if amount0_out.is_zero() == amount1_out.is_zero() {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V2SwapAsFlash requires exactly one of amount0Out/amount1Out",
+                        None::<()>,
+                    ));
+                }
+                let repay_token = request.repay_token.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V2SwapAsFlash requires repayToken",
+                        None::<()>,
+                    )
+                })?;
+                if repay_token == Address::ZERO {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V2SwapAsFlash repayToken must be non-zero",
+                        None::<()>,
+                    ));
+                }
+                let params = (
+                    pair,
+                    amount0_out,
+                    amount1_out,
+                    request.is_first_last_same_eth,
+                    repay_token,
+                    request.path_data.to_vec(),
+                );
+                let sel = if enc {
+                    START_SWAP_AS_FLASH_V2_ENC_SELECTOR
+                } else {
+                    START_SWAP_AS_FLASH_V2_SELECTOR
+                };
+                (sel, params.abi_encode_params())
+            } else if let Some(pair) = request.flash_loan_pair {
                 let amount0_out = parse_flash_loan_amount_wei(request.amount0_out.as_ref());
                 let amount1_out = parse_flash_loan_amount_wei(request.amount1_out.as_ref());
                 let params = (
