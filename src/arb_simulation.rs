@@ -78,10 +78,10 @@ const START_FLASH_LOAN_V3_ENC_SELECTOR: [u8; 4] = [0xcd, 0xa4, 0x37, 0xaf];
 const START_SWAP_AS_FLASH_V3_SELECTOR: [u8; 4] = [0x6d, 0xb4, 0x9b, 0xa8];
 /// startSwapAsFlashV3Enc(address,bool,uint256,bool,address,bytes)
 const START_SWAP_AS_FLASH_V3_ENC_SELECTOR: [u8; 4] = [0x22, 0x47, 0xb7, 0x90];
-/// startSwapAsFlashV2(address,uint96,uint96,bool,address,bytes)
-const START_SWAP_AS_FLASH_V2_SELECTOR: [u8; 4] = [0x37, 0x5a, 0xdf, 0x14];
-/// startSwapAsFlashV2Enc(address,uint96,uint96,bool,address,bytes)
-const START_SWAP_AS_FLASH_V2_ENC_SELECTOR: [u8; 4] = [0x5f, 0x6d, 0xe1, 0xa3];
+/// startSwapAsFlashV2(address,uint96,uint96,bool,address,uint256,bytes)
+const START_SWAP_AS_FLASH_V2_SELECTOR: [u8; 4] = [0x50, 0xe0, 0xee, 0x4c];
+/// startSwapAsFlashV2Enc(address,uint96,uint96,bool,address,uint256,bytes)
+const START_SWAP_AS_FLASH_V2_ENC_SELECTOR: [u8; 4] = [0xd7, 0x4f, 0xe5, 0xb8];
 /// startFlashLoanV4(address,uint256,bool,bytes) selector — FlashArbV3V4 only
 const START_FLASH_LOAN_V4_SELECTOR: [u8; 4] = [0x73, 0xf0, 0x06, 0x21];
 /// startFlashLoanV4Enc(address,uint256,bool,bytes)
@@ -388,6 +388,9 @@ pub struct ArbitrageSimRequest {
     /// V3SwapAsFlash: repay currency (other side of the flash pool)
     #[serde(default)]
     pub repay_token: Option<Address>,
+    /// V2SwapAsFlash: UniswapV2Library.getAmountIn(borrow) in wei (no getReserves in callback)
+    #[serde(default)]
+    pub repay_amount: Option<String>,
     pub is_first_last_same_eth: bool,
     /// arb 合约 init bytecode，模拟时 CREATE 部署
     pub arb_contract_bytecode: Bytes,
@@ -940,12 +943,21 @@ where
                         None::<()>,
                     ));
                 }
+                let repay_amount = parse_flash_loan_amount_wei(request.repay_amount.as_ref());
+                if repay_amount.is_zero() {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "flashLoanType=V2SwapAsFlash requires repayAmount",
+                        None::<()>,
+                    ));
+                }
                 let params = (
                     pair,
                     amount0_out,
                     amount1_out,
                     request.is_first_last_same_eth,
                     repay_token,
+                    repay_amount,
                     request.path_data.to_vec(),
                 );
                 let sel = if enc {
